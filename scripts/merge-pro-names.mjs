@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // One-off utility: merge all pro_swings from one pro name onto another, then
-// delete the old pro row. Uses the anon key from .env.local.
+// delete the old pro row. Uses the service-role key from .env so it bypasses
+// the RLS policies that lock writes on pros/pro_swings.
 //
 //   node scripts/merge-pro-names.mjs "Novak Djokavic" "Novak Djokovic"
 //
@@ -36,9 +37,9 @@ if (!fromName || !toName) {
 }
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+const key = process.env.SUPABASE_SERVICE_KEY
 if (!url || !key) {
-  console.error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local')
+  console.error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_KEY in .env')
   process.exit(1)
 }
 

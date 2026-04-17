@@ -38,11 +38,15 @@ export async function* streamGemini(opts: StreamOptions): AsyncGenerator<string>
   }
   msgs.push(...opts.messages)
 
+  // Use Gemini's native `x-goog-api-key` header instead of `Authorization: Bearer`.
+  // Vercel's runtime was injecting an extra Authorization-equivalent credential
+  // somewhere in the chain, causing Gemini to reject with "Multiple authentication
+  // credentials received". x-goog-api-key sidesteps that entirely.
   const res = await fetch(GEMINI_BASE_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+      'x-goog-api-key': apiKey,
     },
     body: JSON.stringify({
       model,
