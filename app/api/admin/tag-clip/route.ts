@@ -4,8 +4,10 @@ import { requireAdminAuth } from '@/lib/adminAuth'
 import { put } from '@vercel/blob'
 import { execFileSync } from 'child_process'
 import { mkdtempSync, unlinkSync, existsSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import os from 'os'
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
+import youtubeDl from 'youtube-dl-exec'
 import { VALID_SHOT_TYPES, type ShotType } from '@/lib/shotTypeConfig'
 
 const VALID_CAMERA_ANGLES = ['side', 'behind', 'front', 'court_level'] as const
@@ -157,8 +159,17 @@ export async function POST(request: NextRequest) {
   const sourceDuration = endTime - startTime
   const outputDuration = sourceDuration / speedFactor
   const trimmedProName = proName.trim()
-  const projectRoot = process.cwd()
-  const ffmpegBin = join(projectRoot, 'pro-videos', 'bin', 'ffmpeg')
+  // Use binaries from npm packages so this works on Vercel (which doesn't
+  // have system ffmpeg / yt-dlp). The packages pick the correct platform's
+  // binary at install time via optional sub-deps.
+  const ffmpegBin = ffmpegInstaller.path
+  if (!ffmpegBin || !existsSync(ffmpegBin)) {
+    return NextResponse.json(
+      { error: 'ffmpeg binary unavailable on this platform' },
+      { status: 500 },
+    )
+  }
+  const ffmpegDir = dirname(ffmpegBin)
 
   // Step 0: Resolve the pro row BEFORE downloading anything — saves the user
   // from waiting 30–60s on yt-dlp just to hit a name-typo rejection.
@@ -208,36 +219,22 @@ export async function POST(request: NextRequest) {
   const trimmedPath = join(tmpDir, 'trimmed.mp4')
 
   try {
-    // Step 1: Download ONLY the needed segment with yt-dlp --download-sections
-    // Tell yt-dlp where our local ffmpeg is so it can do partial downloads.
-    const ffmpegDir = join(projectRoot, 'pro-videos', 'bin')
+    // Step 1: Download ONLY the needed segment via youtube-dl-exec's bundled
+    // yt-dlp binary. Quality sort picks the highest-res stream YouTube offers
+    // (often 1080p60 VP9 or 4K AV1) and only transcodes when the top-res
+    // stream isn't already H.264.
     const sectionArg = `*${startTime}-${endTime}`
     console.log('[tag-clip] Downloading segment:', sectionArg, 'from:', youtubeUrl)
-    // Quality: sort by resolution first, then prefer H.264/MP4 when available.
-    // This picks the highest-res stream YouTube offers (often 1080p60 VP9 or
-    // 4K AV1) and only transcodes when the top-res stream isn't already H.264.
-    // The old `[ext=mp4]` filter pinned us to a lower-res MP4 fallback.
-    execFileSync(
-      'yt-dlp',
-      [
-        '-f',
-        'bestvideo+bestaudio/best',
-        '-S',
-        'res,ext:mp4:m4a,codec:avc,fps',
-        '--merge-output-format',
-        'mp4',
-        '--no-playlist',
-        '--download-sections',
-        sectionArg,
-        '--force-keyframes-at-cuts',
-        '--ffmpeg-location',
-        ffmpegDir,
-        '-o',
-        tmpFullVideo,
-        youtubeUrl,
-      ],
-      { stdio: 'pipe', timeout: 300_000 }
-    )
+    await youtubeDl(youtubeUrl, {
+      format: 'bestvideo+bestaudio/best',
+      formatSort: 'res,ext:mp4:m4a,codec:avc,fps',
+      mergeOutputFormat: 'mp4',
+      noPlaylist: true,
+      downloadSections: sectionArg,
+      forceKeyframesAtCuts: true,
+      ffmpegLocation: ffmpegDir,
+      output: tmpFullVideo,
+    })
 
     // Step 2: Finalize clip.
     //  - speedFactor === 1: stream copy (lossless) + faststart

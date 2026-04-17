@@ -716,12 +716,10 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
   const SHOT_TYPES: ShotType[] = ['forehand', 'backhand', 'serve', 'volley']
   const CAMERA_ANGLES: CameraAngle[] = ['side', 'behind', 'front', 'court_level']
 
-  // The YouTube source needs yt-dlp + a native ffmpeg binary on the server,
-  // which don't exist on Vercel. The tab is only shown when the deployer
-  // explicitly opts in (set NEXT_PUBLIC_YT_SOURCE_ENABLED=true in .env for
-  // local dev). On Vercel, the tab is hidden so users can't hit a path that
-  // will 500.
-  const youtubeSourceEnabled = process.env.NEXT_PUBLIC_YT_SOURCE_ENABLED === 'true'
+  // YouTube source ships with yt-dlp + ffmpeg binaries via
+  // youtube-dl-exec and @ffmpeg-installer/ffmpeg, so it works on Vercel too.
+  // Keeping the variable as `true` to avoid touching the conditional below.
+  const youtubeSourceEnabled = true
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
@@ -729,10 +727,7 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
       <div className="mb-8">
         <h1 className="text-3xl font-black text-white mb-2">Clip Studio</h1>
         <p className="text-white/50">
-          Trim tennis clips and add them to the pro database.{' '}
-          {youtubeSourceEnabled
-            ? 'Upload a local video, or paste a YouTube URL.'
-            : 'Upload a local video — download it from YouTube first if you need to.'}
+          Trim tennis clips and add them to the pro database. Upload a local video, or paste a YouTube URL.
         </p>
       </div>
 
@@ -845,9 +840,6 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
               </button>
             </div>
             {urlError && <p className="text-red-400 text-sm mt-2">{urlError}</p>}
-            <p className="text-white/30 text-xs mt-3">
-              Requires yt-dlp + ffmpeg on the host. Works in local dev; will fail on Vercel.
-            </p>
           </div>
 
           {videoId && (

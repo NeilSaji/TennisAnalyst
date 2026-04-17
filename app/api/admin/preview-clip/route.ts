@@ -10,9 +10,11 @@ import {
   unlinkSync,
   statSync,
 } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import os from 'os'
 import { randomUUID } from 'crypto'
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
+import youtubeDl from 'youtube-dl-exec'
 
 export const runtime = 'nodejs'
 
@@ -84,9 +86,17 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const projectRoot = process.cwd()
-  const ffmpegDir = join(projectRoot, 'pro-videos', 'bin')
-  const ffmpegBin = join(ffmpegDir, 'ffmpeg')
+  // Use binaries from npm packages so this works on Vercel (which doesn't
+  // have yt-dlp or ffmpeg pre-installed). Falls back to nothing if the
+  // package didn't ship the current platform; we check that below.
+  const ffmpegBin = ffmpegInstaller.path
+  if (!ffmpegBin || !existsSync(ffmpegBin)) {
+    return NextResponse.json(
+      { error: 'ffmpeg binary unavailable on this platform' },
+      { status: 500 },
+    )
+  }
+  const ffmpegDir = dirname(ffmpegBin)
   // Previews are written to a NON-public directory and streamed through an
   // auth-gated GET handler. Previously we dropped them under public/ where
   // anyone who knew the UUID could fetch them; moving them out of public/
@@ -104,30 +114,19 @@ export async function POST(request: NextRequest) {
 
   try {
     const sectionArg = `*${startTime}-${endTime}`
-    // Quality: sort by resolution first, then prefer H.264/MP4 when available.
-    // Matches tag-clip/route.ts so the preview the user sees is exactly the
-    // quality they'll save.
-    execFileSync(
-      'yt-dlp',
-      [
-        '-f',
-        'bestvideo+bestaudio/best',
-        '-S',
-        'res,ext:mp4:m4a,codec:avc,fps',
-        '--merge-output-format',
-        'mp4',
-        '--no-playlist',
-        '--download-sections',
-        sectionArg,
-        '--force-keyframes-at-cuts',
-        '--ffmpeg-location',
-        ffmpegDir,
-        '-o',
-        tmpFullVideo,
-        youtubeUrl,
-      ],
-      { stdio: 'pipe', timeout: 300_000 }
-    )
+    // Use youtube-dl-exec's bundled yt-dlp binary so we don't depend on
+    // a system-installed yt-dlp (absent on Vercel). Flag names map from
+    // kebab-case CLI to camelCase options.
+    await youtubeDl(youtubeUrl, {
+      format: 'bestvideo+bestaudio/best',
+      formatSort: 'res,ext:mp4:m4a,codec:avc,fps',
+      mergeOutputFormat: 'mp4',
+      noPlaylist: true,
+      downloadSections: sectionArg,
+      forceKeyframesAtCuts: true,
+      ffmpegLocation: ffmpegDir,
+      output: tmpFullVideo,
+    })
 
     if (speedFactor === 1) {
       execFileSync(
