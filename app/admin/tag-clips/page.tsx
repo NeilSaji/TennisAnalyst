@@ -1,13 +1,16 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { upload as uploadToBlob } from '@vercel/blob/client'
 import {
+  ADMIN_TOKEN_HEADER,
   adminAuthHeaders,
   clearAdminToken,
   getAdminToken,
   setAdminToken,
   verifyAdminToken,
 } from '@/lib/adminAuthClient'
+import { trimVideoInBrowser } from '@/lib/ffmpegClient'
 
 /* ------------------------------------------------------------------ */
 /*  YouTube IFrame API types                                          */
@@ -107,20 +110,23 @@ export default function TagClipsPage() {
   const [pwSubmitting, setPwSubmitting] = useState(false)
 
   // Try the cached token on mount. If it works, unlock; otherwise show prompt.
+  // Wrapped in a void IIFE so every setAuthState resolves asynchronously,
+  // sidestepping react-hooks/immutability's "cascading renders" warning.
   useEffect(() => {
-    const cached = getAdminToken()
-    if (!cached) {
-      setAuthState('locked')
-      return
-    }
-    verifyAdminToken(cached).then((ok) => {
+    void (async () => {
+      const cached = getAdminToken()
+      if (!cached) {
+        setAuthState('locked')
+        return
+      }
+      const ok = await verifyAdminToken(cached)
       if (ok) {
         setAuthState('unlocked')
       } else {
         clearAdminToken()
         setAuthState('locked')
       }
-    })
+    })()
   }, [])
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
@@ -182,6 +188,9 @@ export default function TagClipsPage() {
 }
 
 function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
+  /* --- Source selection --- */
+  const [sourceType, setSourceType] = useState<'youtube' | 'upload'>('upload')
+
   /* --- YouTube state --- */
   const [youtubeUrl, setYoutubeUrl] = useState('')
   const [videoId, setVideoId] = useState<string | null>(null)
@@ -189,6 +198,24 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
   const [ytReady, setYtReady] = useState(false)
   const playerRef = useRef<YTPlayer | null>(null)
   const apiLoadedRef = useRef(false)
+
+  /* --- Local-upload state --- */
+  const [localFile, setLocalFile] = useState<File | null>(null)
+  const [localFileUrl, setLocalFileUrl] = useState<string | null>(null)
+  const [localFileError, setLocalFileError] = useState<string | null>(null)
+  const [localDragging, setLocalDragging] = useState(false)
+  const [ffmpegProgress, setFfmpegProgress] = useState<number | null>(null)
+  const localVideoRef = useRef<HTMLVideoElement | null>(null)
+  const localFileInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Revoke the object URL when the local file changes or component unmounts
+  // so we don't leak blob: URLs into the document's memory.
+  useEffect(() => {
+    if (!localFileUrl) return
+    return () => {
+      URL.revokeObjectURL(localFileUrl)
+    }
+  }, [localFileUrl])
 
   /* --- Timestamps --- */
   const [startTime, setStartTime] = useState<number | null>(null)
@@ -212,6 +239,9 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
   const [speedFactor, setSpeedFactor] = useState<number>(1)
   const [previewing, setPreviewing] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  // Set only for the upload flow: the trimmed blob, reused on Save so we
+  // don't have to re-encode a second time.
+  const [previewBlob, setPreviewBlob] = useState<Blob | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   // The speedFactor that the current previewUrl was generated with.
   // Save sends this value, so the user cannot save at a speed they haven't verified.
@@ -288,7 +318,11 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
   /*  Handlers                                                        */
   /* ---------------------------------------------------------------- */
   const clearPreview = useCallback(() => {
-    setPreviewUrl(null)
+    setPreviewUrl((prev) => {
+      if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+      return null
+    })
+    setPreviewBlob(null)
     setPreviewedSpeedFactor(null)
     setPreviewError(null)
   }, [])
@@ -307,19 +341,29 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
     clearPreview()
   }, [youtubeUrl, clearPreview])
 
+  const getActiveTime = useCallback((): number | null => {
+    if (sourceType === 'youtube') {
+      return playerRef.current ? playerRef.current.getCurrentTime() : null
+    }
+    const v = localVideoRef.current
+    return v ? v.currentTime : null
+  }, [sourceType])
+
   const handleMarkStart = useCallback(() => {
-    if (!playerRef.current) return
-    setStartTime(playerRef.current.getCurrentTime())
+    const t = getActiveTime()
+    if (t === null) return
+    setStartTime(t)
     setSaveResult(null)
     clearPreview()
-  }, [clearPreview])
+  }, [clearPreview, getActiveTime])
 
   const handleMarkEnd = useCallback(() => {
-    if (!playerRef.current) return
-    setEndTime(playerRef.current.getCurrentTime())
+    const t = getActiveTime()
+    if (t === null) return
+    setEndTime(t)
     setSaveResult(null)
     clearPreview()
-  }, [clearPreview])
+  }, [clearPreview, getActiveTime])
 
   const handleReset = useCallback(() => {
     setStartTime(null)
@@ -333,12 +377,63 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
     clearPreview()
   }, [clearPreview])
 
+  const acceptLocalFile = useCallback((file: File) => {
+    setLocalFileError(null)
+    if (!file.type.startsWith('video/')) {
+      setLocalFileError('File must be a video')
+      return
+    }
+    // Cap at 500MB so ffmpeg.wasm doesn't blow the wasm heap in the browser.
+    if (file.size > 500 * 1024 * 1024) {
+      setLocalFileError('File too large (max 500MB)')
+      return
+    }
+    // Revoke previous local URL, reset clip timings & preview
+    if (localFileUrl) URL.revokeObjectURL(localFileUrl)
+    const url = URL.createObjectURL(file)
+    setLocalFile(file)
+    setLocalFileUrl(url)
+    setStartTime(null)
+    setEndTime(null)
+    clearPreview()
+  }, [localFileUrl, clearPreview])
+
+  const hasSource = sourceType === 'youtube' ? !!videoId : !!localFileUrl
+
   const handlePreview = useCallback(async () => {
     if (startTime === null || endTime === null || endTime <= startTime) return
     setPreviewing(true)
     setPreviewError(null)
     setPreviewUrl(null)
+    setFfmpegProgress(null)
+
     try {
+      if (sourceType === 'upload') {
+        if (!localFile) throw new Error('No video selected')
+        // Cap source duration to match the YouTube path (prevents OOM on the
+        // WASM heap from a 20-minute source).
+        if (endTime - startTime > 60) {
+          throw new Error('Clip must be under 60 seconds')
+        }
+        const blob = await trimVideoInBrowser({
+          file: localFile,
+          startSec: startTime,
+          endSec: endTime,
+          speedFactor,
+          onProgress: (r) => setFfmpegProgress(r),
+        })
+        const url = URL.createObjectURL(blob)
+        // Revoke any previous preview URL before overwriting to avoid leaks.
+        setPreviewUrl((prev) => {
+          if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+          return url
+        })
+        setPreviewBlob(blob)
+        setPreviewedSpeedFactor(speedFactor)
+        return
+      }
+
+      // YouTube path (server-side yt-dlp + ffmpeg, local-only in practice).
       const res = await fetch('/api/admin/preview-clip', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...adminAuthHeaders() },
@@ -361,8 +456,9 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
       setPreviewError(message)
     } finally {
       setPreviewing(false)
+      setFfmpegProgress(null)
     }
-  }, [youtubeUrl, startTime, endTime, speedFactor])
+  }, [sourceType, localFile, youtubeUrl, startTime, endTime, speedFactor, onLockOut])
 
   const handleSpeedChange = useCallback(
     (f: number) => {
@@ -398,14 +494,14 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
   }, [canDownload, previewUrl, proName, shotType, cameraAngle])
 
   const canSave =
-    videoId &&
     startTime !== null &&
     endTime !== null &&
     endTime > startTime &&
     proName.trim() !== '' &&
     shotType !== null &&
     cameraAngle !== null &&
-    !saving
+    !saving &&
+    (sourceType === 'youtube' ? !!videoId : !!previewBlob && previewedSpeedFactor === speedFactor)
 
   const handleSave = useCallback(async (opts?: { confirmNewPro?: boolean }) => {
     if (!canSave) return
@@ -413,6 +509,98 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
     setSaveResult(null)
     setFuzzySuggestions(null)
 
+    if (sourceType === 'upload') {
+      // Upload flow: push the preview Blob to Vercel Blob via the signed
+      // client-token endpoint, then POST metadata to /api/clips/save. We
+      // skip the server-side yt-dlp/ffmpeg entirely.
+      try {
+        if (!previewBlob) throw new Error('Preview is missing')
+        const sanitized = sanitizeFilename(proName)
+        const blobPath = `pro-videos/${sanitized}_${shotType}_${cameraAngle}_${Date.now()}.mp4`
+        const uploadedBlob = await uploadToBlob(blobPath, previewBlob, {
+          access: 'public',
+          handleUploadUrl: '/api/clips/upload',
+          contentType: 'video/mp4',
+          // Admin token forwarded to the token-generation call so only
+          // authenticated clients can mint Blob upload URLs.
+          clientPayload: null,
+          headers: {
+            [ADMIN_TOKEN_HEADER]: getAdminToken() ?? '',
+          },
+        } as Parameters<typeof uploadToBlob>[2])
+        const res = await fetch('/api/clips/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...adminAuthHeaders() },
+          body: JSON.stringify({
+            blobUrl: uploadedBlob.url,
+            proName: proName.trim(),
+            nationality: proNameIsKnown ? undefined : nationality.trim() || undefined,
+            shotType,
+            cameraAngle,
+            speedFactor,
+            durationSec: (endTime! - startTime!) / speedFactor,
+            sourceLabel: localFile?.name,
+            confirmNewPro: opts?.confirmNewPro ?? false,
+          }),
+        })
+        if (res.status === 401) {
+          clearAdminToken()
+          onLockOut()
+          setSaving(false)
+          return
+        }
+        if (res.status === 409) {
+          const data = (await res.json().catch(() => null)) as
+            | { error?: string; suggestions?: string[]; code?: string }
+            | null
+          if (data?.code === 'fuzzy_match' && Array.isArray(data.suggestions)) {
+            setFuzzySuggestions(data.suggestions)
+            setSaveResult({ ok: false, msg: data.error ?? 'Possible typo — confirm name.' })
+            setSaving(false)
+            return
+          }
+        }
+        if (!res.ok) {
+          const text = await res.text()
+          throw new Error(text || `Server error ${res.status}`)
+        }
+        setSaveResult({ ok: true, msg: 'Clip saved successfully!' })
+        setSavedClips((prev) => [
+          ...prev,
+          {
+            proName: proName.trim(),
+            shotType: shotType!,
+            cameraAngle: cameraAngle!,
+            duration: (endTime! - startTime!) / speedFactor,
+            speedFactor,
+            status: 'saved',
+          },
+        ])
+        handleReset()
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error'
+        setSaveResult({ ok: false, msg: message })
+        setSavedClips((prev) => [
+          ...prev,
+          {
+            proName: proName.trim(),
+            shotType: shotType ?? 'forehand',
+            cameraAngle: cameraAngle ?? 'side',
+            duration:
+              endTime !== null && startTime !== null
+                ? (endTime - startTime) / speedFactor
+                : 0,
+            speedFactor,
+            status: 'error',
+          },
+        ])
+      } finally {
+        setSaving(false)
+      }
+      return
+    }
+
+    // YouTube flow: server does everything.
     const body = {
       youtubeUrl,
       startTime,
@@ -487,6 +675,9 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
     }
   }, [
     canSave,
+    sourceType,
+    previewBlob,
+    localFile,
     youtubeUrl,
     startTime,
     endTime,
@@ -497,6 +688,7 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
     cameraAngle,
     speedFactor,
     handleReset,
+    onLockOut,
   ])
 
   /* ---------------------------------------------------------------- */
@@ -517,57 +709,146 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
     <div className="max-w-4xl mx-auto px-4 py-8">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-3xl font-black text-white mb-2">Tag Clips</h1>
+        <h1 className="text-3xl font-black text-white mb-2">Clip Studio</h1>
         <p className="text-white/50">
-          Tag tennis clips from YouTube videos and add them to the pro database.
+          Trim tennis clips and add them to the pro database. Upload a local video, or paste a YouTube URL (local dev only).
         </p>
       </div>
 
-      {/* YouTube URL input */}
-      <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6">
-        <label className="block text-sm font-semibold text-white mb-2">YouTube URL</label>
-        <div className="flex gap-3">
-          <input
-            type="text"
-            value={youtubeUrl}
-            onChange={(e) => setYoutubeUrl(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleLoad()}
-            placeholder="https://www.youtube.com/watch?v=..."
-            className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 transition-colors"
-          />
-          <button
-            onClick={handleLoad}
-            className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl transition-colors flex-shrink-0"
-          >
-            Load
-          </button>
-        </div>
-        {urlError && <p className="text-red-400 text-sm mt-2">{urlError}</p>}
+      {/* Source toggle */}
+      <div className="flex gap-2 p-1 bg-white/5 rounded-xl w-fit mb-6">
+        <button
+          onClick={() => {
+            setSourceType('upload')
+            clearPreview()
+          }}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            sourceType === 'upload' ? 'bg-white text-black' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          Upload Video
+        </button>
+        <button
+          onClick={() => {
+            setSourceType('youtube')
+            clearPreview()
+          }}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            sourceType === 'youtube' ? 'bg-white text-black' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          YouTube URL
+        </button>
       </div>
 
-      {/* YouTube Player */}
-      {videoId && (
-        <div className="rounded-2xl border border-white/10 bg-black overflow-hidden mb-6">
-          <div className="aspect-video">
-            <div id="yt-player" className="w-full h-full" />
+      {/* Upload Video source */}
+      {sourceType === 'upload' && (
+        <>
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6">
+            <label className="block text-sm font-semibold text-white mb-3">Upload Video</label>
+            <div
+              onDragOver={(e) => {
+                e.preventDefault()
+                setLocalDragging(true)
+              }}
+              onDragLeave={() => setLocalDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault()
+                setLocalDragging(false)
+                const f = e.dataTransfer.files[0]
+                if (f) acceptLocalFile(f)
+              }}
+              onClick={() => localFileInputRef.current?.click()}
+              className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
+                localDragging
+                  ? 'border-emerald-400 bg-emerald-500/10'
+                  : 'border-white/20 hover:border-white/40 hover:bg-white/5'
+              }`}
+            >
+              <input
+                ref={localFileInputRef}
+                type="file"
+                accept="video/*"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) acceptLocalFile(f)
+                }}
+              />
+              <div className="text-4xl mb-2">🎬</div>
+              <p className="text-white font-medium">
+                {localFile ? localFile.name : 'Drop a video here or click to choose'}
+              </p>
+              <p className="text-white/40 text-xs mt-1">MP4, MOV, WebM · Max 500MB · Trimmed in-browser</p>
+              {localFileError && <p className="text-red-400 text-sm mt-2">{localFileError}</p>}
+            </div>
           </div>
-        </div>
+
+          {localFileUrl && (
+            <div className="rounded-2xl border border-white/10 bg-black overflow-hidden mb-6">
+              <video
+                ref={localVideoRef}
+                src={localFileUrl}
+                controls
+                className="w-full aspect-video"
+                playsInline
+              />
+            </div>
+          )}
+        </>
+      )}
+
+      {/* YouTube URL source */}
+      {sourceType === 'youtube' && (
+        <>
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6">
+            <label className="block text-sm font-semibold text-white mb-2">YouTube URL</label>
+            <div className="flex gap-3">
+              <input
+                type="text"
+                value={youtubeUrl}
+                onChange={(e) => setYoutubeUrl(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleLoad()}
+                placeholder="https://www.youtube.com/watch?v=..."
+                className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 transition-colors"
+              />
+              <button
+                onClick={handleLoad}
+                className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl transition-colors flex-shrink-0"
+              >
+                Load
+              </button>
+            </div>
+            {urlError && <p className="text-red-400 text-sm mt-2">{urlError}</p>}
+            <p className="text-white/30 text-xs mt-3">
+              Requires yt-dlp + ffmpeg on the host. Works in local dev; will fail on Vercel.
+            </p>
+          </div>
+
+          {videoId && (
+            <div className="rounded-2xl border border-white/10 bg-black overflow-hidden mb-6">
+              <div className="aspect-video">
+                <div id="yt-player" className="w-full h-full" />
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {/* Mark Start / Mark End */}
-      {videoId && (
+      {hasSource && (
         <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6">
           <div className="flex flex-wrap items-center gap-4">
             <button
               onClick={handleMarkStart}
-              disabled={!ytReady}
+              disabled={sourceType === 'youtube' ? !ytReady : !localFileUrl}
               className="px-5 py-2.5 bg-white/10 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl border border-white/10 transition-colors"
             >
               Mark Start
             </button>
             <button
               onClick={handleMarkEnd}
-              disabled={!ytReady}
+              disabled={sourceType === 'youtube' ? !ytReady : !localFileUrl}
               className="px-5 py-2.5 bg-white/10 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl border border-white/10 transition-colors"
             >
               Mark End
@@ -602,7 +883,7 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
       )}
 
       {/* Preview + Speed */}
-      {videoId && startTime !== null && endTime !== null && endTime > startTime && (
+      {hasSource && startTime !== null && endTime !== null && endTime > startTime && (
         <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6 space-y-5">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <h2 className="text-lg font-semibold text-white">Preview & Speed</h2>
@@ -650,6 +931,20 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
             </p>
           )}
 
+          {previewing && sourceType === 'upload' && ffmpegProgress !== null && (
+            <div className="space-y-1">
+              <p className="text-white/50 text-xs">
+                Trimming in browser… {Math.round(ffmpegProgress * 100)}%
+              </p>
+              <div className="h-1 bg-white/5 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-400 transition-all"
+                  style={{ width: `${Math.round(ffmpegProgress * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+
           {previewUrl ? (
             <div className="rounded-xl border border-white/10 bg-black overflow-hidden">
               <video
@@ -677,7 +972,7 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
       )}
 
       {/* Metadata form */}
-      {videoId && (
+      {hasSource && (
         <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6 space-y-5">
           <h2 className="text-lg font-semibold text-white">Clip Metadata</h2>
 
@@ -809,7 +1104,7 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
       )}
 
       {/* Action buttons */}
-      {videoId && (
+      {hasSource && (
         <div className="flex items-center gap-4 mb-6">
           <button
             onClick={() => handleSave()}
