@@ -166,7 +166,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'
     console.error('[preview-clip] Failed:', message)
-    return NextResponse.json({ error: message }, { status: 500 })
+    return NextResponse.json({ error: 'Preview generation failed' }, { status: 500 })
   } finally {
     try {
       if (existsSync(tmpDir)) {

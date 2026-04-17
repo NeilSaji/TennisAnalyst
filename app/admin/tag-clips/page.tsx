@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { upload as uploadToBlob } from '@vercel/blob/client'
 import {
-  ADMIN_TOKEN_HEADER,
   adminAuthHeaders,
   clearAdminToken,
   getAdminToken,
@@ -517,17 +516,14 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
         if (!previewBlob) throw new Error('Preview is missing')
         const sanitized = sanitizeFilename(proName)
         const blobPath = `pro-videos/${sanitized}_${shotType}_${cameraAngle}_${Date.now()}.mp4`
+        // Admin token rides through the documented clientPayload channel so
+        // /api/clips/upload can authenticate the token-generation request.
         const uploadedBlob = await uploadToBlob(blobPath, previewBlob, {
           access: 'public',
           handleUploadUrl: '/api/clips/upload',
           contentType: 'video/mp4',
-          // Admin token forwarded to the token-generation call so only
-          // authenticated clients can mint Blob upload URLs.
-          clientPayload: null,
-          headers: {
-            [ADMIN_TOKEN_HEADER]: getAdminToken() ?? '',
-          },
-        } as Parameters<typeof uploadToBlob>[2])
+          clientPayload: JSON.stringify({ adminToken: getAdminToken() ?? '' }),
+        })
         const res = await fetch('/api/clips/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...adminAuthHeaders() },

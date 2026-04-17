@@ -100,13 +100,22 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Failed to download video' }, { status: 502 })
     }
   } else {
-    videoPath = path.join(process.cwd(), 'public', videoUrl)
-    if (!existsSync(videoPath)) {
+    // Legacy code path: video_url might be a relative path like
+    // /pro-videos/foo.mp4 that maps under public/. Resolve it explicitly and
+    // verify it stays inside public/ so a row with video_url=../../etc/passwd
+    // can't trick us into running the Python script on a system file.
+    const publicRoot = path.resolve(process.cwd(), 'public')
+    const resolved = path.resolve(publicRoot, videoUrl.replace(/^\/+/, ''))
+    if (!resolved.startsWith(publicRoot + path.sep) && resolved !== publicRoot) {
+      return NextResponse.json({ error: 'Invalid video path' }, { status: 400 })
+    }
+    if (!existsSync(resolved)) {
       return NextResponse.json(
         { error: 'Video file not found on disk' },
         { status: 404 }
       )
     }
+    videoPath = resolved
   }
 
   let result: {
@@ -146,7 +155,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown extraction error'
     console.error('[/api/admin/extract-keypoints] Extraction error:', message)
-    return NextResponse.json({ error: message }, { status: 500 })
+    return NextResponse.json({ error: 'Keypoint extraction failed' }, { status: 500 })
   } finally {
     if (tmpDir) {
       try {

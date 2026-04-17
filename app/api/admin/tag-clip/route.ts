@@ -68,14 +68,19 @@ function validateBody(body: Record<string, unknown>): string | null {
     return 'youtubeUrl must be a valid YouTube URL'
   }
 
-  if (typeof startTime !== 'number' || isNaN(startTime)) {
-    return 'startTime is required and must be a number'
+  if (typeof startTime !== 'number' || !Number.isFinite(startTime) || startTime < 0) {
+    return 'startTime must be a finite non-negative number'
   }
-  if (typeof endTime !== 'number' || isNaN(endTime)) {
-    return 'endTime is required and must be a number'
+  if (typeof endTime !== 'number' || !Number.isFinite(endTime)) {
+    return 'endTime must be a finite number'
   }
   if (endTime <= startTime) {
     return 'endTime must be greater than startTime'
+  }
+  // Cap segment length so a stolen token can't trigger a 60-min yt-dlp
+  // download on the server and exhaust disk / bandwidth / function time.
+  if (endTime - startTime > 60) {
+    return 'Clip segment cannot exceed 60 seconds'
   }
 
   if (!proName || typeof proName !== 'string') {
@@ -383,7 +388,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'
     console.error('[tag-clip] Processing failed:', message)
-    return NextResponse.json({ error: message }, { status: 500 })
+    return NextResponse.json({ error: 'Clip processing failed' }, { status: 500 })
   } finally {
     // Clean up temp files
     try {
