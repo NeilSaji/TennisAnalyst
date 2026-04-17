@@ -8,7 +8,7 @@
 // Docs:
 //   https://ai.google.dev/api/generate-content#method:-models.streamgeneratecontent
 
-const GEMINI_MODEL_DEFAULT = 'gemini-2.5-flash'
+const GEMINI_MODEL_DEFAULT = 'gemini-2.0-flash'
 
 export type ChatMessage = {
   role: 'system' | 'user' | 'assistant'
