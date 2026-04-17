@@ -208,11 +208,17 @@ export async function POST(request: NextRequest) {
     const ffmpegDir = join(projectRoot, 'pro-videos', 'bin')
     const sectionArg = `*${startTime}-${endTime}`
     console.log('[tag-clip] Downloading segment:', sectionArg, 'from:', youtubeUrl)
+    // Quality: sort by resolution first, then prefer H.264/MP4 when available.
+    // This picks the highest-res stream YouTube offers (often 1080p60 VP9 or
+    // 4K AV1) and only transcodes when the top-res stream isn't already H.264.
+    // The old `[ext=mp4]` filter pinned us to a lower-res MP4 fallback.
     execFileSync(
       'yt-dlp',
       [
         '-f',
-        'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'bestvideo+bestaudio/best',
+        '-S',
+        'res,ext:mp4:m4a,codec:avc,fps',
         '--merge-output-format',
         'mp4',
         '--no-playlist',
@@ -317,6 +323,9 @@ export async function POST(request: NextRequest) {
           camera_angle: cameraAngle,
           source: 'youtube',
           original_url: youtubeUrl,
+          start_time_sec: startTime,
+          end_time_sec: endTime,
+          speed_factor: speedFactor,
           label: `${shotType}_${cameraAngle}`,
         },
       })

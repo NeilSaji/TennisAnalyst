@@ -100,11 +100,16 @@ export async function POST(request: NextRequest) {
 
   try {
     const sectionArg = `*${startTime}-${endTime}`
+    // Quality: sort by resolution first, then prefer H.264/MP4 when available.
+    // Matches tag-clip/route.ts so the preview the user sees is exactly the
+    // quality they'll save.
     execFileSync(
       'yt-dlp',
       [
         '-f',
-        'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'bestvideo+bestaudio/best',
+        '-S',
+        'res,ext:mp4:m4a,codec:avc,fps',
         '--merge-output-format',
         'mp4',
         '--no-playlist',
