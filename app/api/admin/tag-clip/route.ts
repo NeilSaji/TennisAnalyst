@@ -227,7 +227,10 @@ export async function POST(request: NextRequest) {
     console.log('[tag-clip] Downloading segment:', sectionArg, 'from:', youtubeUrl)
     await youtubeDl(youtubeUrl, {
       format: 'bestvideo+bestaudio/best',
-      formatSort: 'res,ext:mp4:m4a,codec:avc,fps',
+      // Colon-delimited sort keys (ext:mp4:m4a, codec:avc) are valid yt-dlp
+      // syntax but the Node wrapper's types only whitelist bare keys.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      formatSort: ['res', 'ext:mp4:m4a', 'codec:avc', 'fps'] as any,
       mergeOutputFormat: 'mp4',
       noPlaylist: true,
       downloadSections: sectionArg,
@@ -345,7 +348,7 @@ export async function POST(request: NextRequest) {
     // until the finally block runs). Reading from blob would re-download.
     let frameCount = 0
     try {
-      const scriptPath = join(projectRoot, 'railway-service', 'extract_clip_keypoints.py')
+      const scriptPath = join(process.cwd(), 'railway-service', 'extract_clip_keypoints.py')
       if (existsSync(scriptPath) && existsSync(trimmedPath)) {
         console.log('[tag-clip] Extracting keypoints...')
         const kpOutput = execFileSync(

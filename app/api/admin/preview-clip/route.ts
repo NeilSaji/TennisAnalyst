@@ -119,7 +119,10 @@ export async function POST(request: NextRequest) {
     // kebab-case CLI to camelCase options.
     await youtubeDl(youtubeUrl, {
       format: 'bestvideo+bestaudio/best',
-      formatSort: 'res,ext:mp4:m4a,codec:avc,fps',
+      // Colon-delimited sort keys (ext:mp4:m4a, codec:avc) are valid yt-dlp
+      // syntax but the Node wrapper's types only whitelist bare keys.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      formatSort: ['res', 'ext:mp4:m4a', 'codec:avc', 'fps'] as any,
       mergeOutputFormat: 'mp4',
       noPlaylist: true,
       downloadSections: sectionArg,
