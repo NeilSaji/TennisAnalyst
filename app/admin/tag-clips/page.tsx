@@ -716,10 +716,13 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
   const SHOT_TYPES: ShotType[] = ['forehand', 'backhand', 'serve', 'volley']
   const CAMERA_ANGLES: CameraAngle[] = ['side', 'behind', 'front', 'court_level']
 
-  // YouTube source ships with yt-dlp + ffmpeg binaries via
-  // youtube-dl-exec and @ffmpeg-installer/ffmpeg, so it works on Vercel too.
-  // Keeping the variable as `true` to avoid touching the conditional below.
-  const youtubeSourceEnabled = true
+  // YouTube trim works fine in local dev but YouTube's bot check blocks
+  // Vercel's datacenter IPs. So we show the tab only when the deployer
+  // explicitly opts in via NEXT_PUBLIC_YT_SOURCE_ENABLED=true. Set it in
+  // your local .env; leave it unset on Vercel. Clips tagged locally still
+  // land in the production Supabase + Vercel Blob, so this doesn't split
+  // your data — just moves where the downloading happens.
+  const youtubeSourceEnabled = process.env.NEXT_PUBLIC_YT_SOURCE_ENABLED === 'true'
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
@@ -727,7 +730,10 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
       <div className="mb-8">
         <h1 className="text-3xl font-black text-white mb-2">Clip Studio</h1>
         <p className="text-white/50">
-          Trim tennis clips and add them to the pro database. Upload a local video, or paste a YouTube URL.
+          Trim tennis clips and add them to the pro database.{' '}
+          {youtubeSourceEnabled
+            ? 'Upload a local video, or paste a YouTube URL.'
+            : 'Upload a local video — for YouTube, run the tagger from your laptop (same data store).'}
         </p>
       </div>
 
