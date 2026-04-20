@@ -100,7 +100,10 @@ ANTHROPIC_API_KEY=sk-ant-...
 # Vercel Blob (for video uploads)
 BLOB_READ_WRITE_TOKEN=vercel_blob_...
 
-# Railway service (optional, for server-side extraction)
+# Railway service (optional, for server-side extraction + /classify-angle
+# telemetry). If either is unset, analysis_events.capture_quality_flag stays
+# null for every analyze call — telemetry is fire-and-forget and never blocks
+# coaching.
 RAILWAY_SERVICE_URL=https://your-service.railway.app
 EXTRACT_API_KEY=your-api-key
 ```

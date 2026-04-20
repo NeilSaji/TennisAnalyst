@@ -191,9 +191,13 @@ function describeGoal(profile: UserProfile): string {
   return label
 }
 
-// Shared across every tier block so the model is reminded to coach what it
-// actually sees, not what the player claimed.
-const RECONCILE_RULE = `RECONCILE RULE: You are told the player's self-reported tier. If what you observe in the swing data looks meaningfully more elementary, gently shift into foundation coaching without being condescending — phrase it like 'let's lock this in before we refine higher up.' If they're more advanced than they reported, meet them where they actually are. Don't argue with the self-report, just coach the swing in front of you.`
+// Defanged reconcile rule used only for self-reported-tier players. Previously
+// this told the LLM to downgrade mid-response if the swing "looked elementary",
+// which produced the Djokovic regression: a single-camera pose summary is
+// nowhere near enough signal to override what the player said about themselves.
+// New contract: coach to the self-report, full stop. If pose numbers look
+// inconsistent with the stated tier, assume camera geometry or a bad take.
+const RECONCILE_RULE = `RECONCILE RULE: The self-reported tier is a CONTRACT. Coach to it. Do NOT downgrade the player mid-response because the pose data looks rougher than the stated tier. Single-camera pose estimates are noisy — a weird elbow angle or scattered hip rotation is almost always camera geometry, occlusion, or a single off-take, NOT evidence that the player misreported their level. Trust the self-report. If the numbers surprise you, assume the camera is at fault, pick the cleanest frames to anchor on, and coach them at the tier they told you they're at. Never imply they overestimated themselves. Never phrase feedback like "let's lock in the basics first" unless their tier is beginner. Meet them exactly where they said they are.`
 
 const TIER_RULES: Record<SkillTier, string> = {
   beginner: `TIER: Beginner (new to tennis). One foundation cue per analysis. Lead with what's working. Never list three problems — they'll quit. Use physical feel cues only.`,
@@ -202,15 +206,85 @@ const TIER_RULES: Record<SkillTier, string> = {
   advanced: `TIER: Advanced (top club / college / pro). Default to 'this is clean, keep grooving it' — one micro-refinement max, or nothing to fix. Never invent problems. If the swing is solid, say so and stop. Point them toward saving this as a baseline for drift detection.`,
 }
 
+// Trailing instruction appended to every prompt branch so we can collect
+// telemetry on what tier the LLM actually thought the swing was, even when the
+// defanged RECONCILE_RULE prevents it from acting on that belief. The server
+// parses and strips this line before the client sees the response.
+const TIER_ASSESSMENT_TRAILER = `At the very END of your response, on its own final line, emit EXACTLY:
+[TIER_ASSESSMENT: <beginner|intermediate|competitive|advanced|unknown>]
+Do not explain this line. The server parses and strips it before the player sees it.`
+
+// Exported so the analyze routes can parse + strip the trailer after the
+// stream buffers. Unanchored (global) + case-insensitive — if the LLM appends
+// a period/emoji/extra paragraph after the tag, we still match + strip it
+// rather than leaking the raw `[TIER_ASSESSMENT: ...]` line to the user.
+export const TIER_ASSESSMENT_REGEX =
+  /\[TIER_ASSESSMENT:\s*(beginner|intermediate|competitive|advanced|unknown)\s*\]/gi
+
+// Parse the trailer out of a buffered response. Returns the assessed tier
+// (lowercase) and the response with the trailer stripped. If no trailer is
+// found, returns null + the original text. We also strip any trailing blank
+// lines left behind after the trailer is removed so the coaching text doesn't
+// look truncated. Uses the LAST match in the buffer — the model occasionally
+// quotes the format earlier in coaching, and we only care about the real tag.
+export function parseTierAssessmentTrailer(buffered: string): {
+  assessedTier: 'beginner' | 'intermediate' | 'competitive' | 'advanced' | 'unknown' | null
+  stripped: string
+} {
+  const matches = Array.from(buffered.matchAll(TIER_ASSESSMENT_REGEX))
+  if (matches.length === 0) {
+    return { assessedTier: null, stripped: buffered }
+  }
+  const last = matches[matches.length - 1]
+  const tier = last[1].toLowerCase() as
+    | 'beginner'
+    | 'intermediate'
+    | 'competitive'
+    | 'advanced'
+    | 'unknown'
+  // Strip EVERY trailer instance (defensive — the model occasionally emits
+  // more than one), then clean up trailing whitespace.
+  const stripped = buffered.replace(TIER_ASSESSMENT_REGEX, '').replace(/\s+$/, '')
+  return { assessedTier: tier, stripped }
+}
+
+// Ordering used to decide whether the LLM's assessed tier represents a
+// downgrade from the self-reported tier. 'unknown' is not a real tier; callers
+// treat a null assessed tier as "no downgrade detected".
+const TIER_RANK: Record<SkillTier, number> = {
+  beginner: 0,
+  intermediate: 1,
+  competitive: 2,
+  advanced: 3,
+}
+
+export function tierRank(tier: SkillTier): number {
+  return TIER_RANK[tier]
+}
+
+// True when the LLM's assessed tier is strictly lower than the tier we coached
+// to. Returns false whenever either side is null/unknown — missing data is not
+// a downgrade signal.
+export function isTierDowngrade(
+  coachedTier: SkillTier | null,
+  assessedTier: 'beginner' | 'intermediate' | 'competitive' | 'advanced' | 'unknown' | null,
+): boolean {
+  if (!coachedTier || !assessedTier || assessedTier === 'unknown') return false
+  return TIER_RANK[assessedTier] < TIER_RANK[coachedTier]
+}
+
 // Fallback block when no profile is available (legacy users, anonymous
 // sessions). Keeps the prompt coherent without assuming a tier — mirrors the
-// old SKILL_CALIBRATION behavior.
+// old SKILL_CALIBRATION behavior. Trailer instruction appended so we still
+// capture the assessed tier for anon sessions.
 const GENERIC_CALIBRATION = `READ THE SKILL LEVEL FIRST:
 Before giving any advice, look at the joint angles and phase timing. Judge how refined this swing already is.
 - Polished / near-pro mechanics: give SUBTLE refinements, not rebuilds.
 - Solid intermediate: point to the 2 or 3 biggest gaps and give practical drills.
 - Still developing: focus on foundations, and pick the ONE thing that unlocks everything else.
-Match the advice to what the swing actually needs. Never default to generic cues.`
+Match the advice to what the swing actually needs. Never default to generic cues.
+
+${TIER_ASSESSMENT_TRAILER}`
 
 // Returns the prompt fragment that tier-specific coaching is built from.
 // Designed to be interpolated into the route prompts — contains the tier
@@ -237,14 +311,20 @@ PLAYER CONTEXT:
 - Backhand style: ${backhandLabel}. When discussing the backhand side, tailor cues to this grip.
 
 GOAL WEIGHTING:
-- The player's stated priority is: ${goalLabel}. Prioritize observations that move the needle on this goal and mention it explicitly in at least one cue.`
+- The player's stated priority is: ${goalLabel}. Prioritize observations that move the needle on this goal and mention it explicitly in at least one cue.
+
+${TIER_ASSESSMENT_TRAILER}`
 }
 
 // Prompt block for users who skipped onboarding. The LLM is told there is no
 // self-reported tier, asked to classify the swing from the data, name its
 // inferred tier in a short italic header, then coach using that tier's rules.
-// Keeps the reconcile rule so the model can still shift mid-response if the
-// swing surprises it partway through.
+//
+// Unlike the self-reported path (where RECONCILE_RULE is defanged into a
+// "coach to the contract" instruction), the skipped path keeps the three-
+// signal override gate: the LLM is allowed to shift tier mid-response only if
+// multiple independent signals agree the swing is different from the initial
+// guess. Without a self-report, there is no contract to preserve.
 export function buildInferredTierCoachingBlock(): string {
   return `INFERRED TIER MODE: The player declined to self-report their skill level. Classify their swing from the joint angle and phase data into ONE of these four tiers, then coach to that tier:
 
@@ -263,7 +343,9 @@ TIER RULES (use the one matching the tier you picked):
 - competitive: ${TIER_RULES.competitive}
 - advanced: ${TIER_RULES.advanced}
 
-${RECONCILE_RULE}`
+RECONCILE RULE (three-signal override): Because there is no self-report to anchor on, you are allowed to shift your inferred tier mid-response if, and only if, at least THREE independent signals agree with the shift. Examples of independent signals: kinetic chain sequencing, trunk rotation magnitude, contact-point consistency across frames, racket-drop depth, phase-timing regularity. One weird number is not a signal. One off-frame is not a signal. If you shift, be explicit: "updating my read to <tier>" and continue from there. If only one or two signals disagree with your first guess, assume noise and stay the course.
+
+${TIER_ASSESSMENT_TRAILER}`
 }
 
 // One-shot fetch of everything the coaching routes need from auth: the parsed

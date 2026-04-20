@@ -6,7 +6,10 @@ import {
   getProfile,
   hasCompletedOnboardingFlow,
   isOnboarded,
+  isTierDowngrade,
   parseProfile,
+  parseTierAssessmentTrailer,
+  tierRank,
   wasSkipped,
   type UserProfile,
   type SkillTier,
@@ -54,10 +57,28 @@ describe('buildTierCoachingBlock', () => {
     expect(block).toMatch(/baseline/i)
   })
 
-  it.each(tiers)('includes the reconcile rule on the %s block', (tier) => {
+  it.each(tiers)('includes the defanged reconcile rule on the %s block', (tier) => {
     const block = buildTierCoachingBlock(baseProfile({ skill_tier: tier }))
     expect(block).toMatch(/RECONCILE RULE/)
-    expect(block).toMatch(/lock this in before we refine higher up/i)
+    // New "coach to the contract" phrasing replaces the old downgrade-permission.
+    expect(block).toMatch(/self-reported tier is a CONTRACT/)
+  })
+
+  it.each(tiers)('does NOT contain downgrade-permission phrasing on the %s block', (tier) => {
+    const block = buildTierCoachingBlock(baseProfile({ skill_tier: tier }))
+    // Old phrasings that invited a downgrade mid-response are gone.
+    expect(block).not.toMatch(/lock this in before we refine higher up/i)
+    expect(block).not.toMatch(/shift into foundation coaching/i)
+    expect(block).not.toMatch(/meaningfully more elementary/i)
+    // Explicit anti-downgrade language is present.
+    expect(block).toMatch(/do not downgrade/i)
+    expect(block).toMatch(/camera geometry/i)
+  })
+
+  it.each(tiers)('includes the TIER_ASSESSMENT trailer instruction on the %s block', (tier) => {
+    const block = buildTierCoachingBlock(baseProfile({ skill_tier: tier }))
+    expect(block).toMatch(/\[TIER_ASSESSMENT:/)
+    expect(block).toMatch(/server parses and strips/i)
   })
 
   it('mentions the right side for right-handed players', () => {
@@ -275,6 +296,99 @@ describe('buildInferredTierCoachingBlock', () => {
 
   it('includes the reconcile rule so the model can shift mid-response', () => {
     expect(block).toMatch(/RECONCILE RULE/)
+  })
+
+  it('keeps the three-signal override gate in the skipped-user path', () => {
+    // Skipped users have no self-report contract to protect, so the LLM is
+    // explicitly allowed to shift tier when multiple independent signals agree.
+    expect(block).toMatch(/three-signal override/i)
+    expect(block).toMatch(/at least THREE independent signals/i)
+  })
+
+  it('includes the TIER_ASSESSMENT trailer instruction', () => {
+    expect(block).toMatch(/\[TIER_ASSESSMENT:/)
+    expect(block).toMatch(/server parses and strips/i)
+  })
+})
+
+describe('parseTierAssessmentTrailer', () => {
+  it('returns null assessed tier and original text when no trailer is present', () => {
+    const r = parseTierAssessmentTrailer('Here is some coaching advice.')
+    expect(r.assessedTier).toBeNull()
+    expect(r.stripped).toBe('Here is some coaching advice.')
+  })
+
+  it('extracts each recognized tier', () => {
+    const tiers = ['beginner', 'intermediate', 'competitive', 'advanced', 'unknown'] as const
+    for (const t of tiers) {
+      const r = parseTierAssessmentTrailer(`Coach body here.\n\n[TIER_ASSESSMENT: ${t}]`)
+      expect(r.assessedTier).toBe(t)
+      expect(r.stripped).toBe('Coach body here.')
+    }
+  })
+
+  it('is case-insensitive on the tier value', () => {
+    const r = parseTierAssessmentTrailer('body\n[TIER_ASSESSMENT: Competitive]')
+    expect(r.assessedTier).toBe('competitive')
+  })
+
+  it('strips trailing whitespace after the trailer', () => {
+    const r = parseTierAssessmentTrailer('body text\n\n[TIER_ASSESSMENT: advanced]   \n')
+    expect(r.assessedTier).toBe('advanced')
+    expect(r.stripped).toBe('body text')
+  })
+
+  it('strips the trailer even when the model appends trailing text after it', () => {
+    // Regex is intentionally unanchored so a stray period, emoji, or extra
+    // sentence after the tag doesn't cause the raw trailer to leak to the user.
+    const r = parseTierAssessmentTrailer(
+      'Nice work.\n\n[TIER_ASSESSMENT: advanced] 🎾',
+    )
+    expect(r.assessedTier).toBe('advanced')
+    expect(r.stripped).not.toContain('TIER_ASSESSMENT')
+    expect(r.stripped).toContain('Nice work.')
+  })
+
+  it('uses the LAST trailer match when the model emits the format more than once', () => {
+    const r = parseTierAssessmentTrailer(
+      'Earlier I thought [TIER_ASSESSMENT: intermediate] but now\n\n[TIER_ASSESSMENT: advanced]',
+    )
+    expect(r.assessedTier).toBe('advanced')
+    expect(r.stripped).not.toContain('TIER_ASSESSMENT')
+  })
+})
+
+describe('tierRank', () => {
+  it('orders tiers correctly', () => {
+    expect(tierRank('beginner')).toBeLessThan(tierRank('intermediate'))
+    expect(tierRank('intermediate')).toBeLessThan(tierRank('competitive'))
+    expect(tierRank('competitive')).toBeLessThan(tierRank('advanced'))
+  })
+})
+
+describe('isTierDowngrade', () => {
+  it('is true when assessed tier is strictly lower than coached tier', () => {
+    expect(isTierDowngrade('advanced', 'intermediate')).toBe(true)
+    expect(isTierDowngrade('competitive', 'beginner')).toBe(true)
+  })
+
+  it('is false when assessed tier matches the coached tier', () => {
+    expect(isTierDowngrade('intermediate', 'intermediate')).toBe(false)
+  })
+
+  it('is false when assessed tier is higher than coached tier', () => {
+    expect(isTierDowngrade('beginner', 'advanced')).toBe(false)
+  })
+
+  it('is false when either side is null', () => {
+    expect(isTierDowngrade(null, 'advanced')).toBe(false)
+    expect(isTierDowngrade('advanced', null)).toBe(false)
+    expect(isTierDowngrade(null, null)).toBe(false)
+  })
+
+  it('is false when the assessed tier is unknown', () => {
+    // "unknown" means the LLM couldn't tell — it shouldn't count as downgrade signal.
+    expect(isTierDowngrade('advanced', 'unknown')).toBe(false)
   })
 })
 

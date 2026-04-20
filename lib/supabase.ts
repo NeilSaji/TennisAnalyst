@@ -147,6 +147,44 @@ export type Baseline = {
   replaced_at: string | null
 }
 
+// Telemetry row written by /api/analyze and /api/segments/.../analyze. Backs
+// the post-launch "is the Djokovic downgrade a one-off or a pattern" SQL
+// investigation. See lib/db/007_analysis_events.sql.
+export type AnalysisEvent = {
+  id: string
+  user_id: string | null
+  session_id: string | null
+  segment_id: string | null
+  created_at: string
+
+  self_reported_tier: 'beginner' | 'intermediate' | 'competitive' | 'advanced' | null
+  was_skipped: boolean
+  handedness: 'right' | 'left' | null
+  backhand_style: 'one_handed' | 'two_handed' | null
+  primary_goal: string | null
+
+  shot_type: string | null
+  blob_url: string | null
+
+  composite_metrics: Record<string, unknown> | null
+
+  llm_assessed_tier: 'beginner' | 'intermediate' | 'competitive' | 'advanced' | null
+  llm_coached_tier: 'beginner' | 'intermediate' | 'competitive' | 'advanced' | null
+  llm_tier_downgrade: boolean
+
+  capture_quality_flag:
+    | 'green_side'
+    | 'yellow_oblique'
+    | 'red_front_or_back'
+    | 'unknown'
+    | null
+
+  user_correction: 'correct' | 'too_easy' | 'too_hard' | null
+  user_correction_note: string | null
+}
+
+export type UserCorrection = NonNullable<AnalysisEvent['user_correction']>
+
 export type VideoSegment = {
   id: string
   session_id: string

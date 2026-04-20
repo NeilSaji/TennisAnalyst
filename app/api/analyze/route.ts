@@ -1,14 +1,25 @@
+// Telemetry uses Railway's /classify-angle endpoint. Requires:
+//   RAILWAY_SERVICE_URL=https://...railway.app
+//   EXTRACT_API_KEY=<same key used for /extract>
+// Missing either -> capture_quality_flag stays null on every row.
+// This is intentional -- telemetry must never block coaching.
+
 import { NextRequest, NextResponse } from 'next/server'
+import { after } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
-import { supabase } from '@/lib/supabase'
+import { supabase, supabaseAdmin } from '@/lib/supabase'
 import { createClient } from '@/lib/supabase/server'
 import { buildAngleSummary } from '@/lib/jointAngles'
 import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
+import { classifyAndTagCaptureQuality } from '@/lib/captureQuality'
 import {
   buildInferredTierCoachingBlock,
   buildTierCoachingBlock,
   getCoachingContext,
+  isTierDowngrade,
+  parseTierAssessmentTrailer,
 } from '@/lib/profile'
+import { sanitizePromptInput } from '@/lib/sanitize'
 import type { KeypointsJson } from '@/lib/supabase'
 
 const anthropic = new Anthropic({
@@ -23,6 +34,8 @@ export async function POST(request: NextRequest) {
   // instead, so we don't ignore their "I don't want to self-report" signal.
   const authClient = await createClient()
   const { profile, skipped } = await getCoachingContext(authClient)
+  const { data: userData } = await authClient.auth.getUser().catch(() => ({ data: { user: null } }))
+  const userId = userData?.user?.id ?? null
 
   let body
   try { body = await request.json() }
@@ -34,20 +47,9 @@ export async function POST(request: NextRequest) {
     userFocus,
     compareMode,
     baselineLabel,
+    shotType: bodyShotType,
+    blobUrl: bodyBlobUrl,
   } = body
-  // Sanitize user-supplied strings that flow verbatim into the LLM prompt.
-  // Strip newlines + control chars (so an attacker can't break out of their
-  // delimited section and inject new instructions) and cap length.
-  const sanitizePromptInput = (v: unknown, maxLen: number): string | null => {
-    if (typeof v !== 'string') return null
-    const cleaned = v
-      // Control chars (U+0000–U+001F, U+007F) including \n\r\t + unicode RTL overrides
-      .replace(/[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, maxLen)
-    return cleaned || null
-  }
 
   const focus = sanitizePromptInput(userFocus, 240)
   const isBaselineCompare = compareMode === 'baseline'
@@ -264,6 +266,75 @@ VOICE RULES (follow these strictly):
 - No bullet points with just numbers. No tables. No clinical language.
 - Write "you" and "your" constantly. Talk TO the player.`
 
+  // llm_coached_tier is the tier we're actually telling the LLM to coach to.
+  // For self-reported users, that's the profile tier. For skipped users, the
+  // LLM picks one from the swing data — null at insert, backfilled from the
+  // parsed assessment trailer after the stream completes.
+  const coachedTier = profile?.skill_tier ?? null
+
+  // Derive shot_type and blob_url for the telemetry row. Falls back to fetching
+  // from user_sessions when a sessionId was provided but the body didn't
+  // include them. Best-effort: a failure here shouldn't block coaching, so any
+  // DB error falls through to nulls.
+  let resolvedShotType: string | null = typeof bodyShotType === 'string' ? bodyShotType : null
+  let resolvedBlobUrl: string | null = typeof bodyBlobUrl === 'string' ? bodyBlobUrl : null
+  if ((!resolvedShotType || !resolvedBlobUrl) && sessionId) {
+    try {
+      const { data: sessionMeta } = await supabase
+        .from('user_sessions')
+        .select('shot_type, blob_url')
+        .eq('id', sessionId)
+        .single()
+      if (sessionMeta) {
+        resolvedShotType = resolvedShotType ?? sessionMeta.shot_type ?? null
+        resolvedBlobUrl = resolvedBlobUrl ?? sessionMeta.blob_url ?? null
+      }
+    } catch (err) {
+      console.error('analysis_events shot_type/blob_url lookup failed:', err)
+    }
+  }
+
+  // Insert the telemetry row BEFORE streaming starts so the X-Analysis-Event-Id
+  // header can be set on the response the frontend binds its thumbs button to.
+  // Wrapped in try/catch: telemetry must NEVER fail the coaching stream.
+  let eventId: string | null = null
+  try {
+    const { data: inserted, error: insertError } = await supabaseAdmin
+      .from('analysis_events')
+      .insert({
+        user_id: userId,
+        session_id: sessionId ?? null,
+        segment_id: null,
+        self_reported_tier: profile?.skill_tier ?? null,
+        was_skipped: skipped,
+        handedness: profile?.dominant_hand ?? null,
+        backhand_style: profile?.backhand_style ?? null,
+        primary_goal: profile?.primary_goal ?? null,
+        shot_type: resolvedShotType,
+        blob_url: resolvedBlobUrl,
+        composite_metrics: { user_summary: userSummary },
+        llm_coached_tier: coachedTier,
+        llm_assessed_tier: null,
+        llm_tier_downgrade: false,
+        capture_quality_flag: null,
+      })
+      .select('id')
+      .single()
+    if (insertError) {
+      console.error('analysis_events insert failed:', insertError)
+    } else {
+      eventId = inserted?.id ?? null
+    }
+  } catch (err) {
+    console.error('analysis_events insert threw:', err)
+  }
+
+  // Telemetry-only camera-angle classification. Wrapped in after() so Vercel
+  // keeps the invocation warm long enough for the Railway call + DB UPDATE
+  // to complete. Without after(), serverless freeze after stream close was
+  // dropping the UPDATE and leaving capture_quality_flag null in prod.
+  after(() => classifyAndTagCaptureQuality(eventId, resolvedBlobUrl))
+
   const messageStream = anthropic.messages.stream({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
@@ -273,31 +344,67 @@ VOICE RULES (follow these strictly):
 
   const encoder = new TextEncoder()
   const ERROR_PREFIX = '\n\n[ERROR] '
+
+  // We buffer the full response before emitting, then parse + strip the
+  // [TIER_ASSESSMENT: ...] trailer. Latency cost is the streaming UX (response
+  // arrives in one shot instead of token-by-token), but the telemetry signal —
+  // seeing what the model thought the tier was, even when the defanged
+  // reconcile rule prevents it from acting — is worth far more than perceived
+  // typing speed. Total generation is capped at 1024 tokens so the wait is
+  // bounded in the low single-digit seconds.
   const stream = new ReadableStream({
     async start(controller) {
+      let buffered = ''
+      let streamFailed = false
+      let streamError: string | null = null
       try {
         for await (const chunk of messageStream) {
           if (
             chunk.type === 'content_block_delta' &&
             chunk.delta.type === 'text_delta'
           ) {
-            controller.enqueue(encoder.encode(chunk.delta.text))
+            buffered += chunk.delta.text
           }
         }
-        controller.close()
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Analysis stream failed'
-        controller.enqueue(encoder.encode(`${ERROR_PREFIX}${msg}`))
-        controller.close()
+        streamFailed = true
+        streamError = err instanceof Error ? err.message : 'Analysis stream failed'
+      }
+
+      const { assessedTier, stripped } = parseTierAssessmentTrailer(buffered)
+      controller.enqueue(encoder.encode(stripped))
+      if (streamFailed && streamError) {
+        controller.enqueue(encoder.encode(`${ERROR_PREFIX}${streamError}`))
+      }
+      controller.close()
+
+      // Backfill the parsed assessment + downgrade flag. Wrapped in after()
+      // so Vercel keeps the invocation live past controller.close() — without
+      // this the DB UPDATE gets dropped when the function freezes.
+      if (eventId) {
+        const backfillCoached = coachedTier ?? (assessedTier && assessedTier !== 'unknown' ? assessedTier : null)
+        const downgrade = isTierDowngrade(backfillCoached, assessedTier)
+        after(async () => {
+          const { error } = await supabaseAdmin
+            .from('analysis_events')
+            .update({
+              llm_assessed_tier: assessedTier,
+              llm_coached_tier: backfillCoached,
+              llm_tier_downgrade: downgrade,
+            })
+            .eq('id', eventId)
+          if (error) console.error('analysis_events update failed:', error)
+        })
       }
     },
   })
 
-  return new NextResponse(stream, {
-    headers: {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-cache',
-      'X-Content-Type-Options': 'nosniff',
-    },
-  })
+  const headers: Record<string, string> = {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'X-Content-Type-Options': 'nosniff',
+  }
+  if (eventId) headers['X-Analysis-Event-Id'] = eventId
+
+  return new NextResponse(stream, { headers })
 }

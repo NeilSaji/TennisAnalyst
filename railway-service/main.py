@@ -512,6 +512,169 @@ async def _upload_clip_to_blob(clip_path: str, shot_type: str) -> str:
     return url
 
 
+# ---------------------------------------------------------------------------
+# Camera angle classification (telemetry-only)
+# ---------------------------------------------------------------------------
+#
+# Wraps camera_classifier.classify_frame in an HTTP endpoint so Node analyze
+# routes can tag each analysis_events row with a capture_quality_flag. The
+# classifier exposes five raw labels -- behind / side / front / overhead /
+# unknown. There is NO oblique-angle branch in the underlying heuristics, so
+# the Node-facing enum only uses the three-bucket schema:
+#   side     -> green_side
+#   behind   -> red_front_or_back
+#   front    -> red_front_or_back
+#   overhead -> unknown   (classifier can't see the player clearly enough)
+#   unknown  -> unknown
+# yellow_oblique exists in the DB enum but we never emit it -- if we ever add
+# oblique detection in camera_classifier.py, map it here.
+
+
+class ClassifyAngleRequest(BaseModel):
+    video_url: str
+
+
+_RAW_TO_TELEMETRY_FLAG = {
+    "side": "green_side",
+    "behind": "red_front_or_back",
+    "front": "red_front_or_back",
+    "overhead": "unknown",
+    "unknown": "unknown",
+}
+
+
+def _sample_frame_indices(total_frames: int) -> list[int]:
+    """Pick ~5 frames spread across the clip: start, 25%, 50%, 75%, end.
+
+    Deduped and clamped so very short clips (fewer than 5 sampleable frames)
+    still return something sensible. Returns an empty list if there are no
+    frames to sample.
+    """
+    if total_frames <= 0:
+        return []
+    if total_frames <= 5:
+        return list(range(total_frames))
+    markers = [0.0, 0.25, 0.5, 0.75, 1.0]
+    indices: list[int] = []
+    for m in markers:
+        idx = min(total_frames - 1, max(0, int(round(m * (total_frames - 1)))))
+        if idx not in indices:
+            indices.append(idx)
+    return indices
+
+
+def _aggregate_angle_labels(labels: list[str]) -> str:
+    """Pick the majority raw label, or 'unknown' if the vote is split.
+
+    We only count non-'unknown' labels toward majority. If every sample is
+    'unknown' (classifier couldn't find court/player), we return 'unknown'.
+    A single dominant label needs STRICT majority of the non-unknown votes
+    -- ties and near-ties fall through to 'unknown' so mixed-angle clips
+    don't get a confident flag they don't deserve.
+    """
+    if not labels:
+        return "unknown"
+    considered = [lbl for lbl in labels if lbl and lbl != "unknown"]
+    if not considered:
+        return "unknown"
+    counts: dict[str, int] = {}
+    for lbl in considered:
+        counts[lbl] = counts.get(lbl, 0) + 1
+    top_label, top_count = max(counts.items(), key=lambda kv: kv[1])
+    if top_count * 2 > len(considered):
+        return top_label
+    return "unknown"
+
+
+def _classify_video_frames(video_path: str) -> tuple[str, int]:
+    """Sample frames, classify each, and aggregate to a raw label.
+
+    Returns (raw_label, samples_considered). raw_label is one of the five
+    classifier labels. samples_considered is how many frames we actually ran
+    classify_frame on (0 if the video couldn't be opened).
+    """
+    from camera_classifier import classify_frame  # local import so tests can patch
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return "unknown", 0
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        indices = _sample_frame_indices(total)
+        labels: list[str] = []
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            try:
+                _, raw = classify_frame(frame)
+            except Exception as e:  # noqa: BLE001
+                print(f"[classify-angle] classify_frame failed on frame {idx}: {e}")
+                continue
+            labels.append(raw or "unknown")
+        return _aggregate_angle_labels(labels), len(labels)
+    finally:
+        cap.release()
+
+
+@app.post("/classify-angle")
+async def classify_angle(
+    req: ClassifyAngleRequest,
+    authorization: str = Header(default=""),
+):
+    """Classify the dominant camera angle for a clip and return a telemetry flag.
+
+    Always returns 200 with a capture_quality_flag. Any failure path falls
+    through to {"capture_quality_flag": "unknown", "error": "..."} so the
+    Node caller never has to branch on HTTP errors -- telemetry must never
+    block coaching.
+    """
+    expected = f"Bearer {EXTRACT_API_KEY}"
+    if authorization != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not _is_url_allowed(req.video_url):
+        raise HTTPException(
+            status_code=400,
+            detail="video_url must use https and point to an allowed storage domain",
+        )
+
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.get(req.video_url)
+            response.raise_for_status()
+            with open(tmp_path, "wb") as f:
+                f.write(response.content)
+
+        raw_label, samples = await asyncio.to_thread(_classify_video_frames, tmp_path)
+        flag = _RAW_TO_TELEMETRY_FLAG.get(raw_label, "unknown")
+        return {
+            "capture_quality_flag": flag,
+            "raw_label": raw_label,
+            "samples_considered": samples,
+        }
+    except Exception as e:  # noqa: BLE001
+        # Telemetry contract: never surface a non-200 to the Node caller.
+        print(f"[classify-angle] failed for {req.video_url}: {e}")
+        return {
+            "capture_quality_flag": "unknown",
+            "raw_label": "unknown",
+            "samples_considered": 0,
+            "error": str(e),
+        }
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError as e:  # noqa: BLE001
+                print(f"[classify-angle] temp cleanup failed: {e}")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}

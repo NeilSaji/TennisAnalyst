@@ -1,7 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAnalysisStore, usePoseStore } from '@/store'
+import { useUser } from '@/hooks/useUser'
 import type { PoseFrame } from '@/lib/supabase'
 
 interface LLMCoachingPanelProps {
@@ -15,21 +16,38 @@ interface LLMCoachingPanelProps {
   baselineLabel?: string
 }
 
+type Correction = 'correct' | 'too_easy' | 'too_hard'
+type FeedbackState = 'idle' | 'sending' | 'sent' | 'error'
+
 export default function LLMCoachingPanel({ compareMode = 'solo', frames, compareFrames, baselineLabel }: LLMCoachingPanelProps) {
   const [open, setOpen] = useState(false)
   const { feedback, loading, setFeedback, appendFeedback, setLoading, reset } =
     useAnalysisStore()
   const { framesData, sessionId } = usePoseStore()
+  const { user } = useUser()
 
   const [userFocus, setUserFocus] = useState('')
+  const [analysisEventId, setAnalysisEventId] = useState<string | null>(null)
+  const [feedbackState, setFeedbackState] = useState<FeedbackState>('idle')
 
   const canAnalyze = framesData.length > 0
+
+  // If the feedback text clears (e.g. reset/re-analyze), drop any lingering
+  // rating state so the strip doesn't carry across runs.
+  useEffect(() => {
+    if (!feedback) {
+      setFeedbackState('idle')
+      setAnalysisEventId(null)
+    }
+  }, [feedback])
 
   const runAnalysis = async () => {
     if (!canAnalyze || loading) return
     reset()
     setOpen(true)
     setLoading(true)
+    setAnalysisEventId(null)
+    setFeedbackState('idle')
 
     const effectiveFrames = frames ?? framesData
     const keypointsJson = {
@@ -67,6 +85,11 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
 
       if (!res.ok || !res.body) throw new Error('Analysis failed')
 
+      // Backend emits this header at the start of the stream so we can
+      // round-trip a thumbs rating back to the same analysis_events row.
+      const eventId = res.headers.get('X-Analysis-Event-Id')
+      if (eventId) setAnalysisEventId(eventId)
+
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
 
@@ -89,6 +112,24 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       setLoading(false)
     }
   }
+
+  const submitFeedback = async (correction: Correction) => {
+    if (!analysisEventId || feedbackState === 'sending' || feedbackState === 'sent') return
+    setFeedbackState('sending')
+    try {
+      const res = await fetch(`/api/analysis-events/${analysisEventId}/feedback`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ correction }),
+      })
+      if (!res.ok) throw new Error('Feedback failed')
+      setFeedbackState('sent')
+    } catch {
+      setFeedbackState('error')
+    }
+  }
+
+  const showFeedbackStrip = Boolean(feedback) && !loading && Boolean(user) && Boolean(analysisEventId)
 
   return (
     <div className="rounded-xl border border-white/10 overflow-hidden">
@@ -174,6 +215,63 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
             </div>
           )}
         </div>
+      )}
+
+      {showFeedbackStrip && (
+        <FeedbackStrip state={feedbackState} onSubmit={submitFeedback} />
+      )}
+    </div>
+  )
+}
+
+function FeedbackStrip({
+  state,
+  onSubmit,
+}: {
+  state: FeedbackState
+  onSubmit: (correction: Correction) => void
+}) {
+  if (state === 'sent') {
+    return (
+      <div className="bg-white/[0.02] border-t border-white/5 px-4 py-3 text-xs text-white/50">
+        Thanks — logged.
+      </div>
+    )
+  }
+
+  const disabled = state === 'sending'
+
+  return (
+    <div className="bg-white/[0.02] border-t border-white/5 px-4 py-3 flex items-center gap-3 flex-wrap">
+      <span className="text-xs text-white/50">Was this coaching right for you?</span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onSubmit('correct')}
+          disabled={disabled}
+          className="px-2.5 py-1 rounded-lg text-xs font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          👍 Spot on
+        </button>
+        <button
+          type="button"
+          onClick={() => onSubmit('too_hard')}
+          disabled={disabled}
+          className="px-2.5 py-1 rounded-lg text-xs font-medium bg-white/10 text-white/70 border border-white/10 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          ⬇️ Too advanced
+        </button>
+        <button
+          type="button"
+          onClick={() => onSubmit('too_easy')}
+          disabled={disabled}
+          className="px-2.5 py-1 rounded-lg text-xs font-medium bg-white/10 text-white/70 border border-white/10 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          ⬆️ Too simple
+        </button>
+      </div>
+      {state === 'error' && (
+        <span className="text-xs text-rose-300">Couldn&apos;t save — try again?</span>
       )}
     </div>
   )
