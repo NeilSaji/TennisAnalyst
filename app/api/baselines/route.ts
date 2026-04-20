@@ -4,8 +4,23 @@ import { createClient } from '@/lib/supabase/server'
 const VALID_SHOTS = ['forehand', 'backhand', 'serve', 'volley', 'slice'] as const
 type ShotType = (typeof VALID_SHOTS)[number]
 
+// The Vercel Blob public store hostname. We pin the origin so a malicious
+// client can't store a baseline pointing at an attacker-controlled URL —
+// otherwise any later viewer would fetch the "baseline video" from a
+// hostile origin.
+const ALLOWED_BLOB_HOST_SUFFIX = '.public.blob.vercel-storage.com'
+
 function isShotType(v: unknown): v is ShotType {
   return typeof v === 'string' && (VALID_SHOTS as readonly string[]).includes(v)
+}
+
+function isAllowedBlobUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw)
+    return u.protocol === 'https:' && u.hostname.endsWith(ALLOWED_BLOB_HOST_SUFFIX)
+  } catch {
+    return false
+  }
 }
 
 // GET /api/baselines — list baselines for the current auth user.
@@ -51,6 +66,12 @@ export async function POST(request: NextRequest) {
 
   if (typeof blobUrl !== 'string' || !blobUrl) {
     return NextResponse.json({ error: 'blobUrl is required' }, { status: 400 })
+  }
+  if (!isAllowedBlobUrl(blobUrl)) {
+    return NextResponse.json(
+      { error: `blobUrl must be an https URL on ${ALLOWED_BLOB_HOST_SUFFIX}` },
+      { status: 400 },
+    )
   }
   if (!isShotType(shotType)) {
     return NextResponse.json({ error: `shotType must be one of ${VALID_SHOTS.join(', ')}` }, { status: 400 })

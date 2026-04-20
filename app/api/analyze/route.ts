@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '@/lib/supabase'
-import { buildAngleSummary, sampleKeyFrames } from '@/lib/jointAngles'
+import { createClient } from '@/lib/supabase/server'
+import { buildAngleSummary } from '@/lib/jointAngles'
 import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
+import {
+  buildInferredTierCoachingBlock,
+  buildTierCoachingBlock,
+  getCoachingContext,
+} from '@/lib/profile'
 import type { KeypointsJson } from '@/lib/supabase'
 
 const anthropic = new Anthropic({
@@ -10,6 +16,14 @@ const anthropic = new Anthropic({
 })
 
 export async function POST(request: NextRequest) {
+  // Resolve profile + skipped state in a single getUser() round trip so every
+  // prompt branch can tier-calibrate. Anonymous / legacy users return null
+  // profile and skipped=false, falling through to the generic calibration
+  // block. Users who explicitly skipped onboarding get the inferred-tier block
+  // instead, so we don't ignore their "I don't want to self-report" signal.
+  const authClient = await createClient()
+  const { profile, skipped } = await getCoachingContext(authClient)
+
   let body
   try { body = await request.json() }
   catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) }
@@ -21,13 +35,23 @@ export async function POST(request: NextRequest) {
     compareMode,
     baselineLabel,
   } = body
-  const focus =
-    typeof userFocus === 'string' && userFocus.trim() ? userFocus.trim() : null
+  // Sanitize user-supplied strings that flow verbatim into the LLM prompt.
+  // Strip newlines + control chars (so an attacker can't break out of their
+  // delimited section and inject new instructions) and cap length.
+  const sanitizePromptInput = (v: unknown, maxLen: number): string | null => {
+    if (typeof v !== 'string') return null
+    const cleaned = v
+      // Control chars (U+0000–U+001F, U+007F) including \n\r\t + unicode RTL overrides
+      .replace(/[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, maxLen)
+    return cleaned || null
+  }
+
+  const focus = sanitizePromptInput(userFocus, 240)
   const isBaselineCompare = compareMode === 'baseline'
-  const baselineTag =
-    typeof baselineLabel === 'string' && baselineLabel.trim()
-      ? baselineLabel.trim().slice(0, 80)
-      : 'your best day'
+  const baselineTag = sanitizePromptInput(baselineLabel, 80) ?? 'your best day'
 
   // Get user keypoints - from inline payload or session
   let userKeypoints: KeypointsJson | null = inlineKeypoints ?? null
@@ -83,16 +107,15 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Shared coaching rubric: read the user's actual data and calibrate the
-  // severity of advice to how polished the technique already is. Without this,
-  // the model tends to give the same "bend your knees more" notes to a pro and
-  // a first-timer.
-  const SKILL_CALIBRATION = `READ THE SKILL LEVEL FIRST:
-Before giving any advice, look at the joint angles and phase timing. Judge how refined this swing already is.
-- Polished / near-pro mechanics: give SUBTLE refinements, not rebuilds. Telling an advanced player to "bend your knees more" when their legs are already loaded is useless. Find the 5% that would make them even better.
-- Solid intermediate: point to the 2 or 3 biggest gaps and give practical drills.
-- Still developing: focus on foundations, and pick the ONE thing that unlocks everything else.
-Match the advice to what the swing actually needs. Never default to generic cues.`
+  // Tier-aware coaching rubric. Three-way branch:
+  //   profile            -> tier rules + handedness + goal weighting
+  //   skipped && !profile -> infer-tier block (LLM names its guess inline)
+  //   neither            -> generic fallback calibration
+  const tierBlock = profile
+    ? buildTierCoachingBlock(profile)
+    : skipped
+      ? buildInferredTierCoachingBlock()
+      : buildTierCoachingBlock(null)
 
   const focusBlock = focus
     ? `\nTHE PLAYER SPECIFICALLY WANTS FEEDBACK ON: "${focus}"\nWeave a direct answer to this into your response. You can still cover the essentials, but this is their priority.\n`
@@ -141,6 +164,8 @@ Match the advice to what the swing actually needs. Never default to generic cues
       : `Two short sentences on what to groove next session so these swings match.`
 
     prompt = `${framingParagraph}
+
+${tierBlock}
 ${focusBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
@@ -179,10 +204,19 @@ Keep it under 350 words. Sound like a coach helping them tighten up.`
     // Solo mode: single clip, general coaching without any reference.
     const soloRef = getBiomechanicsReference('all')
 
+    // Advanced players get a trimmed prompt because listing three "tips"
+    // when the swing is already clean forces the model to fabricate
+    // problems. Baseline-compare is the right place for drift detection,
+    // so we point them there instead.
+    const isAdvanced = profile?.skill_tier === 'advanced'
+    const advancedTrim = isAdvanced
+      ? `\nADVANCED TRIM: Output at most 2 sentences unless you see a genuine mechanical issue. If the swing is solid, say so and redirect them to baseline-compare for drift detection. Do not force a "3 things to work on" section when there's nothing to fix.\n`
+      : ''
+
     prompt = `You are a tennis coach talking to a player right after watching their swing on video. Be encouraging and practical.
 
-${SKILL_CALIBRATION}
-${focusBlock}
+${tierBlock}
+${advancedTrim}${focusBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Not even once. Describe everything in feel and body language.
 - NEVER rate or score the player (no X/100, no percentages, no grades). Just give advice.

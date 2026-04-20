@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '@/lib/supabase'
+import { createClient } from '@/lib/supabase/server'
 import { buildAngleSummary } from '@/lib/jointAngles'
 import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
+import {
+  buildInferredTierCoachingBlock,
+  buildTierCoachingBlock,
+  getCoachingContext,
+} from '@/lib/profile'
 import type { KeypointsJson } from '@/lib/supabase'
 
 const anthropic = new Anthropic({
@@ -18,6 +24,17 @@ export async function POST(
   // Body is optional now that pro comparisons are gone. Parse-and-discard so
   // old clients that post JSON don't get a 400.
   try { await request.json() } catch { /* ignore */ }
+
+  // Tier-calibrate the segment prompt the same way as the whole-clip analyzer.
+  // Three-way branch: profile -> tier block; skipped -> inferred-tier block;
+  // neither -> generic calibration fallback.
+  const authClient = await createClient()
+  const { profile, skipped } = await getCoachingContext(authClient)
+  const tierBlock = profile
+    ? buildTierCoachingBlock(profile)
+    : skipped
+      ? buildInferredTierCoachingBlock()
+      : buildTierCoachingBlock(null)
 
   const { data: segment, error: segError } = await supabase
     .from('video_segments')
@@ -40,6 +57,8 @@ export async function POST(
   const soloRef = getBiomechanicsReference('all')
 
   const prompt = `You are a tennis coach. This is segment #${segment.segment_index} from a practice video, classified as a ${shotType}.
+
+${tierBlock}
 
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers. Describe in feel and body language.

@@ -9,9 +9,11 @@ vi.mock('next/link', () => ({
 }))
 
 // Nav reads auth state via useUser(). Don't pull a real Supabase client into
-// the test — we're verifying nav structure, not auth rendering.
+// the test — we're verifying nav structure, not auth rendering. The default
+// export is the signed-out case; signed-in tests re-mock below.
+const mockUseUser = vi.fn(() => ({ user: null, loading: false }) as { user: unknown; loading: boolean })
 vi.mock('@/hooks/useUser', () => ({
-  useUser: () => ({ user: null, loading: false }),
+  useUser: () => mockUseUser(),
 }))
 
 describe('Nav', () => {
@@ -51,5 +53,17 @@ describe('Nav', () => {
     render(<Nav />)
     const link = screen.getByText('Baselines').closest('a')!
     expect(link).toHaveAttribute('href', '/baseline')
+  })
+
+  it('shows Profile link in AccountMenu when signed in', () => {
+    mockUseUser.mockReturnValueOnce({ user: { email: 'test@example.com' }, loading: false })
+    render(<Nav />)
+    const profileLink = screen.getByText('Profile').closest('a')!
+    expect(profileLink).toHaveAttribute('href', '/profile')
+  })
+
+  it('does not render Profile link when signed out', () => {
+    render(<Nav />)
+    expect(screen.queryByText('Profile')).not.toBeInTheDocument()
   })
 })

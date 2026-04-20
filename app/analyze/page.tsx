@@ -8,6 +8,7 @@ import SwingSelector from '@/components/SwingSelector'
 import { usePoseStore, useJointStore } from '@/store'
 import { detectSwings } from '@/lib/jointAngles'
 import { useUser } from '@/hooks/useUser'
+import { useProfile } from '@/hooks/useProfile'
 import type { SwingSegment } from '@/lib/jointAngles'
 import type { PoseFrame } from '@/lib/supabase'
 
@@ -27,6 +28,11 @@ export default function AnalyzePage() {
   const [baselineStatus, setBaselineStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [baselineError, setBaselineError] = useState<string | null>(null)
   const { user, loading: authLoading } = useUser()
+  const { profile, skipped, loading: profileLoading } = useProfile()
+  const isAdvanced = !profileLoading && profile?.skill_tier === 'advanced'
+  // Show the "set your profile" hint only to users who explicitly skipped
+  // onboarding — onboarded users already have a tier, anons can't persist one.
+  const showProfileHint = !profileLoading && skipped && !profile
 
   const swings = useMemo(() => detectSwings(allFrames), [allFrames])
   const hasMultipleSwings = swings.length > 1
@@ -147,13 +153,79 @@ export default function AnalyzePage() {
             />
           )}
 
+          {/* Advanced-tier players care most about drift-vs-baseline; surface the
+              baseline save as the lead action and keep the coaching panel below. */}
+          {done && isAdvanced && (
+            <div className="rounded-2xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-emerald-500/[0.02] p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="text-white font-semibold text-base mb-1">
+                    Your real wins are drift-focused
+                  </p>
+                  <p className="text-white/60 text-sm">
+                    Save this and compare against future takes.
+                  </p>
+                  {baselineStatus === 'error' && baselineError && (
+                    <p className="text-red-400 text-xs mt-2">{baselineError}</p>
+                  )}
+                  {baselineStatus === 'saved' && (
+                    <p className="text-emerald-300 text-xs mt-2">
+                      Saved. Future uploads will compare against this.
+                    </p>
+                  )}
+                </div>
+                {!authLoading && !user ? (
+                  <Link
+                    href="/login?next=/analyze"
+                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
+                  >
+                    Sign in to save
+                  </Link>
+                ) : baselineStatus === 'saved' ? (
+                  <Link
+                    href="/baseline/compare"
+                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
+                  >
+                    Compare new swing →
+                  </Link>
+                ) : (
+                  <button
+                    onClick={saveAsBaseline}
+                    disabled={!canSaveBaseline || baselineStatus === 'saving'}
+                    className={`px-4 py-2 text-sm font-semibold rounded-lg transition-colors flex-shrink-0 ${
+                      !canSaveBaseline || baselineStatus === 'saving'
+                        ? 'bg-white/10 text-white/40 cursor-not-allowed'
+                        : 'bg-emerald-500 hover:bg-emerald-400 text-white'
+                    }`}
+                  >
+                    {baselineStatus === 'saving' ? 'Saving...' : 'Save as baseline'}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Subtle nudge for users who skipped onboarding — one line, no CTA
+              button. Only rendered when an analysis is ready so it sits near
+              the coaching output where the tailoring would apply. */}
+          {done && showProfileHint && (
+            <p className="text-xs text-white/50">
+              Not sure your level?{' '}
+              <Link href="/profile" className="underline hover:text-white/80">
+                Tell us for tailored advice →
+              </Link>
+            </p>
+          )}
+
           {/* LLM coaching */}
           {done && (
             <LLMCoachingPanel frames={analysisFrames} />
           )}
 
-          {/* Baseline CTA — the main pivot action */}
-          {done && (
+          {/* Baseline CTA — the main pivot action. Hidden for advanced-tier
+              users because the drift-focused card above already wires the
+              same save-as-baseline action. */}
+          {done && !isAdvanced && (
             <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 flex items-center justify-between gap-4">
               <div className="min-w-0">
                 <p className="text-white font-medium text-sm">Is this your best day?</p>

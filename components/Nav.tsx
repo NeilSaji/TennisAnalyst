@@ -52,6 +52,12 @@ function AccountMenu({ email }: { email: string }) {
           <p className="text-white/50 text-xs">Signed in as</p>
           <p className="text-white text-sm truncate">{email}</p>
         </div>
+        <Link
+          href="/profile"
+          className="block w-full text-left px-3 py-2 text-sm text-white/70 hover:bg-white/5 hover:text-white transition-colors border-b border-white/5"
+        >
+          Profile
+        </Link>
         <form action="/auth/signout" method="post">
           <button
             type="submit"
