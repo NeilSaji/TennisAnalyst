@@ -37,7 +37,7 @@ export default function ComparisonLayout({
   proVideoUrl,
   proName = 'Pro',
 }: ComparisonLayoutProps) {
-  const { visible, showSkeleton, showTrail } = useJointStore()
+  const { visible, showSkeleton, showTrail, showRacket } = useJointStore()
   const { mode, setMode } = useComparisonStore()
   const { syncedTime, setSyncedTime, setTimeMapping, isPlaying, setIsPlaying } = useSyncStore()
 
@@ -159,6 +159,7 @@ export default function ComparisonLayout({
             visible={visible}
             showSkeleton={showSkeleton}
             showTrail={showTrail}
+            showRacket={showRacket}
             syncedTime={syncedTime}
             onTimeUpdate={handleTimeUpdate}
             onPlayPause={handlePlayPause}
@@ -172,6 +173,7 @@ export default function ComparisonLayout({
               visible={visible}
               showSkeleton={showSkeleton}
               showTrail={showTrail}
+              showRacket={showRacket}
               syncedTime={syncedTime}
               onTimeUpdate={handleTimeUpdate}
               syncPlaying={isPlaying}
@@ -202,6 +204,7 @@ interface OverlayViewProps {
   visible: Record<JointGroup, boolean>
   showSkeleton: boolean
   showTrail: boolean
+  showRacket: boolean
   syncedTime: number
   onTimeUpdate: (t: number) => void
   onPlayPause: (playing: boolean) => void
@@ -217,6 +220,7 @@ function OverlayView({
   visible,
   showSkeleton,
   showTrail,
+  showRacket,
   syncedTime,
   onTimeUpdate,
   onPlayPause,
@@ -245,6 +249,7 @@ function OverlayView({
           visible={visible}
           showSkeleton={showSkeleton}
           showTrail={showTrail}
+          showRacket={showRacket}
           overlayColor="rgba(59,130,246,0.9)"
           overlaySkeletonColor="rgba(59,130,246,0.5)"
           syncedTime={syncedTime}

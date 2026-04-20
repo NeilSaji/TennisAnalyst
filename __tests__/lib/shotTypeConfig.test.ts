@@ -22,6 +22,8 @@ const VALID_ANGLE_KEYS: (keyof JointAngles)[] = [
   'left_elbow',
   'right_shoulder',
   'left_shoulder',
+  'right_wrist',
+  'left_wrist',
   'right_knee',
   'left_knee',
   'right_hip',
@@ -161,10 +163,12 @@ describe('SHOT_TYPE_CONFIGS', () => {
     expect(config.keyAngles).toContain('right_knee')
   })
 
-  it('forehand kinetic chain starts with hips and ends with elbow', () => {
+  it('forehand kinetic chain starts with hips and ends with wrist', () => {
     const chain = SHOT_TYPE_CONFIGS.forehand.kineticChainOrder
     expect(chain[0]).toBe('hip_rotation')
-    expect(chain[chain.length - 1]).toBe('right_elbow')
+    expect(chain[chain.length - 1]).toBe('right_wrist')
+    // Elbow must still precede the wrist link (proximal-to-distal).
+    expect(chain[chain.length - 2]).toBe('right_elbow')
   })
 })
 

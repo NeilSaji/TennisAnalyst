@@ -70,6 +70,10 @@ export type JointAngles = {
   left_knee?: number
   right_hip?: number
   left_hip?: number
+  // Wrist flexion (elbow → wrist → index_finger). Added in schema_version 2;
+  // missing on legacy clips.
+  right_wrist?: number
+  left_wrist?: number
   hip_rotation?: number
   trunk_rotation?: number
 }
@@ -83,17 +87,29 @@ export type Landmark = {
   visibility: number
 }
 
+// Detected racket head position in normalized [0,1] coords (same space as
+// Landmark.x/y). Null when no racket was detected with sufficient confidence
+// on this frame. Added in schema_version 2; absent on legacy clips.
+export type RacketHead = {
+  x: number
+  y: number
+  confidence: number
+} | null
+
 export type PoseFrame = {
   frame_index: number
   timestamp_ms: number
   landmarks: Landmark[]
   joint_angles: JointAngles
+  racket_head?: RacketHead
 }
 
 export type KeypointsJson = {
   fps_sampled: number
   frame_count: number
   frames: PoseFrame[]
+  // 1 = legacy (no racket_head, no wrist angles). 2 = current. Treat undefined as 1.
+  schema_version?: 1 | 2
 }
 
 export type PhaseLabels = {

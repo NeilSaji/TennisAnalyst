@@ -18,7 +18,7 @@ async function doInit(): Promise<PoseLandmarkerInstance> {
   return PoseLandmarker.createFromOptions(filesetResolver, {
     baseOptions: {
       modelAssetPath:
-        'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task',
+        'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task',
       delegate: 'GPU',
     },
     runningMode: 'VIDEO',

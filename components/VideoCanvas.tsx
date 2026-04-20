@@ -12,6 +12,8 @@ interface VideoCanvasProps {
   visible: Record<JointGroup, boolean>
   showSkeleton: boolean
   showTrail: boolean
+  /** Render the racket-head trail (schema v2 only; no-op on legacy clips). */
+  showRacket?: boolean
   overlayColor?: string
   overlaySkeletonColor?: string
   syncedTime?: number
@@ -35,6 +37,7 @@ export default function VideoCanvas({
   visible,
   showSkeleton,
   showTrail,
+  showRacket = true,
   overlayColor,
   overlaySkeletonColor,
   syncedTime,
@@ -54,6 +57,12 @@ export default function VideoCanvas({
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rafRef = useRef<number>(0)
+  const rvfcHandleRef = useRef<number>(0)
+  // Once sized for the current videoWidth/Height, avoid re-scaling the ctx
+  // every frame (ctx.scale is cumulative).
+  const canvasSizedRef = useRef<{ w: number; h: number; dpr: number } | null>(
+    null
+  )
   const tracerRef = useRef(new SwingPathTracer())
   const lastFrameIndexRef = useRef(-1)
   const [playing, setPlaying] = useState(false)
@@ -80,69 +89,131 @@ export default function VideoCanvas({
     [framesData]
   )
 
-  // Main render loop
-  const renderFrame = useCallback(() => {
-    const video = videoRef.current
-    const canvas = canvasRef.current
-    if (!video || !canvas) return
-    if (videoError) return
+  // Main render loop. `mediaTime` is the video-clock time in seconds reported
+  // by requestVideoFrameCallback; when absent (rAF fallback) we fall back to
+  // the video element's currentTime.
+  const renderFrame = useCallback(
+    (mediaTime?: number) => {
+      const video = videoRef.current
+      const canvas = canvasRef.current
+      if (!video || !canvas) return
+      if (videoError) return
 
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
 
-    // Match canvas size to video display size
-    if (
-      canvas.width !== video.videoWidth ||
-      canvas.height !== video.videoHeight
-    ) {
-      canvas.width = video.videoWidth || canvas.offsetWidth
-      canvas.height = video.videoHeight || canvas.offsetHeight
-    }
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-    const frame = getFrameAtTime(video.currentTime)
-    if (!frame) {
-      rafRef.current = requestAnimationFrame(renderFrame)
-      return
-    }
-
-    const displayFrame = overlayColor ? normalizeLandmarks(frame) : frame
-
-    // Update swing trail
-    if (showTrail) {
-      if (frame.frame_index !== lastFrameIndexRef.current) {
-        tracerRef.current.push(frame, canvas.width, canvas.height)
-        lastFrameIndexRef.current = frame.frame_index
+      // DPR-aware sizing (mirrors ProSwingViewer.SkeletonPlayer). The canvas
+      // backing store is videoWidth * dpr; drawing code below uses logical
+      // pixels (canvas.width / dpr, canvas.height / dpr).
+      const dpr = window.devicePixelRatio || 1
+      const vw = video.videoWidth
+      const vh = video.videoHeight
+      if (vw && vh) {
+        const sized = canvasSizedRef.current
+        if (!sized || sized.w !== vw || sized.h !== vh || sized.dpr !== dpr) {
+          canvas.width = vw * dpr
+          canvas.height = vh * dpr
+          // Apply once per (size, dpr) — ctx.scale is cumulative across calls.
+          ctx.setTransform(1, 0, 0, 1, 0, 0)
+          ctx.scale(dpr, dpr)
+          canvasSizedRef.current = { w: vw, h: vh, dpr }
+        }
+      } else if (!canvas.width || !canvas.height) {
+        canvas.width = canvas.offsetWidth
+        canvas.height = canvas.offsetHeight
       }
-      tracerRef.current.render(ctx)
-    }
 
-    // Draw pose
-    renderPose(ctx, displayFrame, canvas.width, canvas.height, {
+      const logicalW = canvas.width / dpr
+      const logicalH = canvas.height / dpr
+      ctx.clearRect(0, 0, logicalW, logicalH)
+
+      const t = mediaTime ?? video.currentTime
+      const frame = getFrameAtTime(t)
+      if (!frame) return
+
+      const displayFrame = overlayColor ? normalizeLandmarks(frame) : frame
+
+      // Update swing trail (advance buffer only when the underlying frame
+      // changes so rapid re-renders don't stack duplicates).
+      if (showTrail || showRacket) {
+        if (frame.frame_index !== lastFrameIndexRef.current) {
+          tracerRef.current.push(frame, logicalW, logicalH)
+          lastFrameIndexRef.current = frame.frame_index
+        }
+        tracerRef.current.render(ctx, {
+          showWristTrails: showTrail,
+          showRacketTrail: showRacket,
+        })
+      }
+
+      // Draw pose
+      renderPose(ctx, displayFrame, logicalW, logicalH, {
+        visible,
+        showSkeleton,
+        color: overlayColor,
+        skeletonColor: overlaySkeletonColor,
+      })
+    },
+    [
       visible,
       showSkeleton,
-      color: overlayColor,
-      skeletonColor: overlaySkeletonColor,
-    })
+      showTrail,
+      showRacket,
+      overlayColor,
+      overlaySkeletonColor,
+      getFrameAtTime,
+      videoError,
+    ]
+  )
 
-    rafRef.current = requestAnimationFrame(renderFrame)
-  }, [
-    src,
-    framesData,
-    visible,
-    showSkeleton,
-    showTrail,
-    overlayColor,
-    overlaySkeletonColor,
-    getFrameAtTime,
-    videoError,
-  ])
-
+  // Prefer requestVideoFrameCallback so we repaint in lockstep with decoded
+  // video frames (frame-accurate overlay). Falls back to rAF on Safari/older
+  // browsers where rVFC isn't implemented on HTMLVideoElement.
   useEffect(() => {
-    rafRef.current = requestAnimationFrame(renderFrame)
-    return () => cancelAnimationFrame(rafRef.current)
-  }, [renderFrame])
+    const video = videoRef.current
+    if (!video) return
+
+    let cancelled = false
+    const hasRvfc =
+      typeof HTMLVideoElement !== 'undefined' &&
+      'requestVideoFrameCallback' in HTMLVideoElement.prototype
+
+    if (hasRvfc) {
+      const tick: VideoFrameRequestCallback = (_now, meta) => {
+        if (cancelled) return
+        renderFrame(meta?.mediaTime)
+        rvfcHandleRef.current = video.requestVideoFrameCallback(tick)
+      }
+      // Paint once immediately so paused/first-load state is correct even
+      // before a decoded frame arrives.
+      renderFrame()
+      rvfcHandleRef.current = video.requestVideoFrameCallback(tick)
+
+      return () => {
+        cancelled = true
+        if (
+          rvfcHandleRef.current &&
+          typeof video.cancelVideoFrameCallback === 'function'
+        ) {
+          video.cancelVideoFrameCallback(rvfcHandleRef.current)
+        }
+        rvfcHandleRef.current = 0
+      }
+    }
+
+    // rAF fallback (Safari, etc.)
+    const loop = () => {
+      if (cancelled) return
+      renderFrame()
+      rafRef.current = requestAnimationFrame(loop)
+    }
+    rafRef.current = requestAnimationFrame(loop)
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = 0
+    }
+  }, [renderFrame, src])
 
   // Sync external time control
   useEffect(() => {
@@ -237,10 +308,11 @@ export default function VideoCanvas({
     }
   }, [syncPlaying, playbackRate, isSecondary, proStartDelay, syncedTime])
 
-  // Reset tracer and error state when src changes
+  // Reset tracer, canvas sizing cache, and error state when src changes
   useEffect(() => {
     tracerRef.current.reset()
     lastFrameIndexRef.current = -1
+    canvasSizedRef.current = null
     setVideoError(false)
   }, [src])
 

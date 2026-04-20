@@ -8,9 +8,13 @@ import {
   getShotTypeConfig,
   scoreAngleDeviation,
   scoreAngleVsIdeal,
+  VALID_SHOT_TYPES,
   type DeviationLevel,
   type MistakeCheck,
+  type ShotType,
 } from '@/lib/shotTypeConfig'
+import { getChainTimings } from '@/lib/kineticChain'
+import KineticChainTimingBar from './KineticChainTimingBar'
 
 // ---------------------------------------------------------------------------
 // Props
@@ -61,9 +65,10 @@ function getFrameAtPhase(
   return closest
 }
 
-/** Format angle to a short string. */
+/** Format angle to a short string. Returns em-dash for missing values
+ *  (e.g. wrist angles on legacy schema_version 1 clips). */
 function fmtAngle(v: number | undefined): string {
-  if (v == null) return '--'
+  if (v == null) return '—'
   return `${Math.round(v)}°`
 }
 
@@ -208,6 +213,47 @@ export default function MetricsComparison({
     [userChain, config]
   )
 
+  // Per-joint peak timings for the timing-bar viz. Falls back to 'forehand'
+  // when the shot type isn't one of the canonical 5 (getChainTimings is typed
+  // to ShotType).
+  const resolvedShotType: ShotType = useMemo(() => {
+    const s = (shotType ?? '').toLowerCase().trim() as ShotType
+    return (VALID_SHOT_TYPES as readonly string[]).includes(s) ? s : 'forehand'
+  }, [shotType])
+
+  const userTimings = useMemo(
+    () => getChainTimings(userFrames, resolvedShotType),
+    [userFrames, resolvedShotType]
+  )
+  const proTimings = useMemo(
+    () => getChainTimings(proFrames, resolvedShotType),
+    [proFrames, resolvedShotType]
+  )
+  const userSwingDurationMs = useMemo(() => {
+    if (userFrames.length < 2) return 0
+    return (
+      userFrames[userFrames.length - 1].timestamp_ms -
+      userFrames[0].timestamp_ms
+    )
+  }, [userFrames])
+  const proSwingDurationMs = useMemo(() => {
+    if (proFrames.length < 2) return 0
+    return (
+      proFrames[proFrames.length - 1].timestamp_ms - proFrames[0].timestamp_ms
+    )
+  }, [proFrames])
+
+  // Normalize peak timestamps to be relative to swing start so both bars
+  // start at 0. KineticChainTimingBar then maps them into [0, durationMs].
+  const userTimingsRel = useMemo(() => {
+    const base = userFrames[0]?.timestamp_ms ?? 0
+    return userTimings.map((t) => ({ ...t, peakMs: t.peakMs - base }))
+  }, [userTimings, userFrames])
+  const proTimingsRel = useMemo(() => {
+    const base = proFrames[0]?.timestamp_ms ?? 0
+    return proTimings.map((t) => ({ ...t, peakMs: t.peakMs - base }))
+  }, [proTimings, proFrames])
+
   // Find the biggest area for improvement
   const worstMetric = useMemo(() => {
     const poor = metrics.filter((m) => m.level === 'poor')
@@ -288,6 +334,109 @@ export default function MetricsComparison({
             &quot;whip&quot; that generates effortless power.
           </p>
         )}
+
+        {/* Timing bar: shows per-joint peak timestamps for user vs pro. */}
+        {(userTimingsRel.length > 0 || proTimingsRel.length > 0) && (
+          <div className="mt-3">
+            <KineticChainTimingBar
+              userTimings={userTimingsRel}
+              proTimings={proTimingsRel}
+              swingDurationMs={userSwingDurationMs}
+              proSwingDurationMs={proSwingDurationMs}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Per-phase angle comparison table. Surfaces user-vs-pro deltas for
+          each spec from the shot's keyAngleSpecs, plus wrist-flexion rows
+          (schema_version 2 only; dash for legacy clips). */}
+      <div className="px-4 py-3 border-t border-white/10">
+        <h4 className="text-xs font-semibold text-white/70 uppercase tracking-wider mb-2">
+          Phase Angles
+        </h4>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-white/40">
+                <th className="text-left font-medium py-1">Phase</th>
+                <th className="text-left font-medium py-1">Angle</th>
+                <th className="text-right font-medium py-1">You</th>
+                <th className="text-right font-medium py-1">Pro</th>
+                <th className="text-right font-medium py-1">Δ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.map((m, i) => {
+                const style = DEVIATION_STYLES[m.level]
+                const delta = m.vsProScore.delta
+                return (
+                  <tr
+                    key={`${m.spec.angleKey}-${m.spec.phase}-${i}`}
+                    className="border-t border-white/5"
+                  >
+                    <td className="py-1 text-white/60">
+                      {PHASE_LABELS[m.spec.phase]}
+                    </td>
+                    <td className="py-1 text-white/80">{m.spec.label}</td>
+                    <td className="py-1 text-right tabular-nums text-white/80">
+                      {fmtAngle(m.userAngle)}
+                    </td>
+                    <td className="py-1 text-right tabular-nums text-white/80">
+                      {fmtAngle(m.proAngle)}
+                    </td>
+                    <td
+                      className={`py-1 text-right tabular-nums ${style.text}`}
+                    >
+                      {delta == null ? '—' : `${Math.round(delta)}°`}
+                    </td>
+                  </tr>
+                )
+              })}
+              {/* Wrist flexion rows at contact. Added in schema_version 2 —
+                  legacy clips render '—'. */}
+              {(['right_wrist', 'left_wrist'] as const).map((key) => {
+                const userFrame = getFrameAtPhase(
+                  userFrames,
+                  userPhases,
+                  'contact'
+                )
+                const proFrame = getFrameAtPhase(
+                  proFrames,
+                  proPhases,
+                  'contact'
+                )
+                const userA = userFrame?.joint_angles?.[key]
+                const proA = proFrame?.joint_angles?.[key]
+                const score = scoreAngleDeviation(userA, proA)
+                const style = DEVIATION_STYLES[score.level]
+                const label =
+                  key === 'right_wrist' ? 'R Wrist Flex' : 'L Wrist Flex'
+                return (
+                  <tr key={key} className="border-t border-white/5">
+                    <td className="py-1 text-white/60">
+                      {PHASE_LABELS.contact}
+                    </td>
+                    <td className="py-1 text-white/80">{label}</td>
+                    <td className="py-1 text-right tabular-nums text-white/80">
+                      {fmtAngle(userA)}
+                    </td>
+                    <td className="py-1 text-right tabular-nums text-white/80">
+                      {fmtAngle(proA)}
+                    </td>
+                    <td
+                      className={`py-1 text-right tabular-nums ${style.text}`}
+                    >
+                      {score.delta == null
+                        ? '—'
+                        : `${Math.round(score.delta)}°`}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* Detected Mistakes */}

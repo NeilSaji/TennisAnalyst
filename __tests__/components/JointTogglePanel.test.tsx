@@ -6,6 +6,7 @@ import JointTogglePanel from '@/components/JointTogglePanel'
 const mockToggleJoint = vi.fn()
 const mockToggleSkeleton = vi.fn()
 const mockToggleTrail = vi.fn()
+const mockToggleRacket = vi.fn()
 const mockSetAllVisible = vi.fn()
 const mockSetVisibility = vi.fn()
 
@@ -18,17 +19,21 @@ const defaultVisible = {
   ankles: true,
 }
 
+const defaultStoreState = {
+  visible: { ...defaultVisible },
+  showSkeleton: true,
+  showTrail: true,
+  showRacket: true,
+  toggleJoint: mockToggleJoint,
+  toggleSkeleton: mockToggleSkeleton,
+  toggleTrail: mockToggleTrail,
+  toggleRacket: mockToggleRacket,
+  setAllVisible: mockSetAllVisible,
+  setVisibility: mockSetVisibility,
+}
+
 vi.mock('@/store', () => ({
-  useJointStore: vi.fn(() => ({
-    visible: { ...defaultVisible },
-    showSkeleton: true,
-    showTrail: true,
-    toggleJoint: mockToggleJoint,
-    toggleSkeleton: mockToggleSkeleton,
-    toggleTrail: mockToggleTrail,
-    setAllVisible: mockSetAllVisible,
-    setVisibility: mockSetVisibility,
-  })),
+  useJointStore: vi.fn(() => defaultStoreState),
   useComparisonStore: vi.fn(() => ({
     activeProSwing: null,
   })),
@@ -41,16 +46,7 @@ const mockedUseJointStore = vi.mocked(useJointStore)
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mockedUseJointStore.mockReturnValue({
-    visible: { ...defaultVisible },
-    showSkeleton: true,
-    showTrail: true,
-    toggleJoint: mockToggleJoint,
-    toggleSkeleton: mockToggleSkeleton,
-    toggleTrail: mockToggleTrail,
-    setAllVisible: mockSetAllVisible,
-    setVisibility: mockSetVisibility,
-  })
+  mockedUseJointStore.mockReturnValue({ ...defaultStoreState })
 })
 
 describe('JointTogglePanel', () => {
@@ -64,10 +60,17 @@ describe('JointTogglePanel', () => {
     expect(screen.getByText('Ankles')).toBeInTheDocument()
   })
 
-  it('renders skeleton toggle and trail toggle', () => {
+  it('renders skeleton toggle, trail toggle, and racket toggle', () => {
     render(<JointTogglePanel />)
     expect(screen.getByText('Skeleton Lines')).toBeInTheDocument()
     expect(screen.getByText('Swing Path Trail')).toBeInTheDocument()
+    expect(screen.getByText('Racket')).toBeInTheDocument()
+  })
+
+  it('clicking racket toggle calls toggleRacket', () => {
+    render(<JointTogglePanel />)
+    fireEvent.click(screen.getByText('Racket'))
+    expect(mockToggleRacket).toHaveBeenCalledOnce()
   })
 
   it('clicking a joint group calls toggleJoint with correct group', () => {
@@ -106,14 +109,8 @@ describe('JointTogglePanel', () => {
 
   it('shows "Show all" when some joints are hidden and calls setAllVisible(true)', () => {
     mockedUseJointStore.mockReturnValue({
+      ...defaultStoreState,
       visible: { ...defaultVisible, shoulders: false },
-      showSkeleton: true,
-      showTrail: true,
-      toggleJoint: mockToggleJoint,
-      toggleSkeleton: mockToggleSkeleton,
-      toggleTrail: mockToggleTrail,
-      setAllVisible: mockSetAllVisible,
-      setVisibility: mockSetVisibility,
     })
 
     render(<JointTogglePanel />)
@@ -126,14 +123,8 @@ describe('JointTogglePanel', () => {
 
   it('active joint buttons have different styling than toggled-off joints', () => {
     mockedUseJointStore.mockReturnValue({
+      ...defaultStoreState,
       visible: { ...defaultVisible, shoulders: false, elbows: true },
-      showSkeleton: true,
-      showTrail: true,
-      toggleJoint: mockToggleJoint,
-      toggleSkeleton: mockToggleSkeleton,
-      toggleTrail: mockToggleTrail,
-      setAllVisible: mockSetAllVisible,
-      setVisibility: mockSetVisibility,
     })
 
     render(<JointTogglePanel />)

@@ -9,6 +9,8 @@ export const LANDMARK_INDICES = {
   RIGHT_ELBOW: 14,
   LEFT_WRIST: 15,
   RIGHT_WRIST: 16,
+  LEFT_INDEX: 19,
+  RIGHT_INDEX: 20,
   LEFT_HIP: 23,
   RIGHT_HIP: 24,
   LEFT_KNEE: 25,
@@ -74,6 +76,8 @@ export function computeJointAngles(landmarks: Landmark[]): JointAngles {
   const rElbow = getLandmark(landmarks, LANDMARK_INDICES.RIGHT_ELBOW)
   const lWrist = getLandmark(landmarks, LANDMARK_INDICES.LEFT_WRIST)
   const rWrist = getLandmark(landmarks, LANDMARK_INDICES.RIGHT_WRIST)
+  const lIndex = getLandmark(landmarks, LANDMARK_INDICES.LEFT_INDEX)
+  const rIndex = getLandmark(landmarks, LANDMARK_INDICES.RIGHT_INDEX)
   const lHip = getLandmark(landmarks, LANDMARK_INDICES.LEFT_HIP)
   const rHip = getLandmark(landmarks, LANDMARK_INDICES.RIGHT_HIP)
   const lKnee = getLandmark(landmarks, LANDMARK_INDICES.LEFT_KNEE)
@@ -105,6 +109,19 @@ export function computeJointAngles(landmarks: Landmark[]): JointAngles {
     angles.left_shoulder = angleBetween(
       vec2(lShoulder, rShoulder),
       vec2(lShoulder, lElbow)
+    )
+  }
+  // Wrist flexion: elbow → wrist → index. 180° = straight, smaller = flexed.
+  if (rElbow && rWrist && rIndex) {
+    angles.right_wrist = angleBetween(
+      vec2(rWrist, rElbow),
+      vec2(rWrist, rIndex)
+    )
+  }
+  if (lElbow && lWrist && lIndex) {
+    angles.left_wrist = angleBetween(
+      vec2(lWrist, lElbow),
+      vec2(lWrist, lIndex)
     )
   }
   if (rHip && rKnee && rAnkle) {

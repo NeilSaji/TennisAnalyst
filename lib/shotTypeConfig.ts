@@ -146,7 +146,7 @@ export const SHOT_TYPE_CONFIGS: Record<string, ShotTypeConfig> = {
         coachingCue: 'Let your chest rotate through - the arm rides with the body turn.',
       },
     ],
-    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow'],
+    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow', 'right_wrist'],
     commonMistakes: [
       'Insufficient hip rotation - hips stay square to the net throughout the swing',
       'Arm-only swing - trunk rotation less than 15 degrees between loading and contact',
@@ -227,7 +227,7 @@ export const SHOT_TYPE_CONFIGS: Record<string, ShotTypeConfig> = {
         coachingCue: 'Coil the hips - they should lead the forward swing.',
       },
     ],
-    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'left_shoulder', 'left_elbow'],
+    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'left_shoulder', 'left_elbow', 'left_wrist'],
     commonMistakes: [
       'Insufficient shoulder turn - trunk rotation under 45 degrees during preparation',
       'Over-extended arm at contact - elbow locked at 175+ degrees',
@@ -294,7 +294,7 @@ export const SHOT_TYPE_CONFIGS: Record<string, ShotTypeConfig> = {
         coachingCue: 'Lean into the court and extend upward - land inside the baseline.',
       },
     ],
-    kineticChainOrder: ['right_knee', 'hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow'],
+    kineticChainOrder: ['right_knee', 'hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow', 'right_wrist'],
     commonMistakes: [
       'Insufficient knee bend - knee angle exceeds 160 degrees at trophy position',
       'Low contact point - arm not fully extended at contact',
@@ -346,7 +346,7 @@ export const SHOT_TYPE_CONFIGS: Record<string, ShotTypeConfig> = {
         coachingCue: 'Stay low and athletic - bend those knees for quick reactions.',
       },
     ],
-    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow'],
+    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow', 'right_wrist'],
     commonMistakes: [
       'Taking a full swing - volley should be a compact punch',
       'Wrist breakdown - wrist collapses on contact instead of staying firm',
@@ -397,7 +397,7 @@ export const SHOT_TYPE_CONFIGS: Record<string, ShotTypeConfig> = {
         coachingCue: 'Get low and stay balanced - the slice needs a stable base.',
       },
     ],
-    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow'],
+    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow', 'right_wrist'],
     commonMistakes: [
       'Chopping down on the ball instead of carving through it',
       'Open racket face too early - slice floats with no bite',
@@ -439,6 +439,12 @@ export function getShotTypeConfig(shotType: string | null | undefined): ShotType
 /**
  * Get the recommended joint visibility map for a given shot type.
  * Emphasized and secondary joints are visible; others are hidden.
+ *
+ * Note: the racket-head trail is ALWAYS on for every shot type
+ * (forehand / backhand / serve / volley / slice). It lives on the separate
+ * `showRacket` flag in the joint store (not in this JointGroup map), so this
+ * function doesn't toggle it -- any shot-type "focus" UI should leave
+ * `showRacket` untouched when calling `setVisibility(map)`.
  */
 export function getRecommendedVisibility(
   shotType: string | null | undefined

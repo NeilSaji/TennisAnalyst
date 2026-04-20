@@ -218,6 +218,69 @@ describe('SwingPathTracer', () => {
     expect(mockCtx.beginPath).not.toHaveBeenCalled()
   })
 
+  it('adds racket_head to a separate trail when confidence >= 0.4', () => {
+    for (let i = 0; i < 5; i++) {
+      const frame = makeFrame(
+        i,
+        i * 33,
+        [] // no wrists
+      )
+      // Attach racket_head manually (type requires it be optional on PoseFrame)
+      ;(frame as unknown as { racket_head: { x: number; y: number; confidence: number } }).racket_head = {
+        x: 0.5 + i * 0.02,
+        y: 0.5,
+        confidence: 0.8,
+      }
+      tracer.push(frame, 800, 600)
+    }
+
+    const mockCtx = createMockCanvasContext()
+    // Render only the racket trail
+    tracer.render(mockCtx as unknown as CanvasRenderingContext2D, {
+      showWristTrails: false,
+      showRacketTrail: true,
+    })
+    // Racket trail has 5 points → drawTrail runs → beginPath called.
+    expect(mockCtx.beginPath).toHaveBeenCalled()
+  })
+
+  it('ignores racket_head when confidence < 0.4', () => {
+    for (let i = 0; i < 5; i++) {
+      const frame = makeFrame(i, i * 33, [])
+      ;(frame as unknown as { racket_head: { x: number; y: number; confidence: number } }).racket_head = {
+        x: 0.5,
+        y: 0.5,
+        confidence: 0.2,
+      }
+      tracer.push(frame, 800, 600)
+    }
+
+    const mockCtx = createMockCanvasContext()
+    tracer.render(mockCtx as unknown as CanvasRenderingContext2D, {
+      showWristTrails: false,
+      showRacketTrail: true,
+    })
+    expect(mockCtx.beginPath).not.toHaveBeenCalled()
+  })
+
+  it('tolerates null and absent racket_head (schema v1 / no-detection)', () => {
+    for (let i = 0; i < 5; i++) {
+      const frame = makeFrame(i, i * 33, [])
+      // leave racket_head undefined on some, null on others
+      if (i % 2 === 0) {
+        ;(frame as unknown as { racket_head: null }).racket_head = null
+      }
+      tracer.push(frame, 800, 600)
+    }
+    // No throw = passing.
+    const mockCtx = createMockCanvasContext()
+    tracer.render(mockCtx as unknown as CanvasRenderingContext2D, {
+      showWristTrails: false,
+      showRacketTrail: true,
+    })
+    expect(mockCtx.beginPath).not.toHaveBeenCalled()
+  })
+
   it('only adds right wrist when left wrist is invisible', () => {
     for (let i = 0; i < 5; i++) {
       tracer.push(

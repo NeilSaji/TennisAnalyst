@@ -15,6 +15,10 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+# POSE_BACKEND selects the pose estimator. `mediapipe` is the only supported
+# value today; `rtmpose` is a deliberate seam for a future swap.
+POSE_BACKEND = os.environ.get("POSE_BACKEND", "mediapipe").lower()
+
 LANDMARK_NAMES = [
     "nose", "left_eye_inner", "left_eye", "left_eye_outer",
     "right_eye_inner", "right_eye", "right_eye_outer",
@@ -54,6 +58,7 @@ def compute_joint_angles(landmarks):
         "ls": get(11), "rs": get(12),
         "le": get(13), "re": get(14),
         "lw": get(15), "rw": get(16),
+        "li": get(19), "ri": get(20),
         "lh": get(23), "rh": get(24),
         "lk": get(25), "rk": get(26),
         "la": get(27), "ra": get(28),
@@ -67,6 +72,11 @@ def compute_joint_angles(landmarks):
         angles["right_shoulder"] = round(angle_between(pts["ls"], pts["rs"], pts["re"]), 1)
     if all(pts[k] for k in ["rs", "ls", "le"]):
         angles["left_shoulder"] = round(angle_between(pts["rs"], pts["ls"], pts["le"]), 1)
+    # Wrist flexion: elbow -> wrist -> index finger
+    if all(pts[k] for k in ["re", "rw", "ri"]):
+        angles["right_wrist"] = round(angle_between(pts["re"], pts["rw"], pts["ri"]), 1)
+    if all(pts[k] for k in ["le", "lw", "li"]):
+        angles["left_wrist"] = round(angle_between(pts["le"], pts["lw"], pts["li"]), 1)
     if all(pts[k] for k in ["rh", "rk", "ra"]):
         angles["right_knee"] = round(angle_between(pts["rh"], pts["rk"], pts["ra"]), 1)
     if all(pts[k] for k in ["lh", "lk", "la"]):
@@ -82,6 +92,19 @@ def compute_joint_angles(landmarks):
 
 
 def extract_keypoints(video_path, sample_fps=30):
+    if POSE_BACKEND == "rtmpose":
+        raise NotImplementedError("rtmpose backend not yet implemented")
+    if POSE_BACKEND != "mediapipe":
+        raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND}")
+
+    # Import lazily so a missing ultralytics install fails softly at detect time
+    # rather than preventing the entire extractor from loading.
+    try:
+        from racket_detector import detect_racket  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        print(f"[extract] racket_detector unavailable: {e}")
+        detect_racket = None  # type: ignore
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return {"error": f"Cannot open video: {video_path}"}
@@ -132,11 +155,36 @@ def extract_keypoints(video_path, sample_fps=30):
                         for i, lm in enumerate(lm_list)
                     ]
                     joint_angles = compute_joint_angles(landmarks)
+
+                    racket_head = None
+                    if detect_racket is not None:
+                        h, w = frame.shape[:2]
+                        lw = landmarks[15] if len(landmarks) > 15 else None
+                        rw = landmarks[16] if len(landmarks) > 16 else None
+                        dominant = None
+                        if lw and rw:
+                            dominant = rw if rw["visibility"] >= lw["visibility"] else lw
+                        elif lw:
+                            dominant = lw
+                        elif rw:
+                            dominant = rw
+                        wrist_xy = (
+                            (dominant["x"] * w, dominant["y"] * h)
+                            if dominant is not None
+                            else None
+                        )
+                        try:
+                            racket_head = detect_racket(frame, wrist_xy)
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[extract] racket detect failed on frame {processed_index}: {e}")
+                            racket_head = None
+
                     frames.append({
                         "frame_index": processed_index,
                         "timestamp_ms": round(timestamp_ms, 1),
                         "landmarks": landmarks,
                         "joint_angles": joint_angles,
+                        "racket_head": racket_head,
                     })
                     processed_index += 1
 
@@ -153,6 +201,7 @@ def extract_keypoints(video_path, sample_fps=30):
         "frames": frames,
         "video_fps": video_fps,
         "duration_ms": round(total_duration_ms),
+        "schema_version": 2,
     }
 
 

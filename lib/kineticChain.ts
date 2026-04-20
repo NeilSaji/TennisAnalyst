@@ -1,4 +1,5 @@
 import type { PoseFrame, JointAngles } from './supabase'
+import { getShotTypeConfig, type ShotType } from './shotTypeConfig'
 
 /**
  * Kinetic chain analysis for tennis swings.
@@ -45,6 +46,7 @@ const FOREHAND_CHAIN: { name: string; angleKey: keyof JointAngles }[] = [
   { name: 'trunk', angleKey: 'trunk_rotation' },
   { name: 'shoulder', angleKey: 'right_shoulder' },
   { name: 'elbow', angleKey: 'right_elbow' },
+  { name: 'wrist', angleKey: 'right_wrist' },
 ]
 
 /**
@@ -198,3 +200,24 @@ export function analyzeKineticChain(
 
 /** The default forehand chain definition, exported for testing and reuse. */
 export const FOREHAND_KINETIC_CHAIN = FOREHAND_CHAIN
+
+/**
+ * Per-chain-link peak timestamps for the timing-bar UI. The returned array
+ * mirrors the shot's `kineticChainOrder` so the UI can walk through it
+ * without re-deriving the chain. Links whose peak could not be detected are
+ * omitted — the UI renders them as absent ticks.
+ */
+export function getChainTimings(
+  frames: PoseFrame[],
+  shotType: ShotType
+): { joint: string; peakMs: number }[] {
+  const order = getShotTypeConfig(shotType).kineticChainOrder
+  const out: { joint: string; peakMs: number }[] = []
+  for (const angleKey of order) {
+    const peak = findPeakAngularVelocity(frames, angleKey)
+    if (peak.peakFrame >= 0) {
+      out.push({ joint: String(angleKey), peakMs: peak.peakTimestampMs })
+    }
+  }
+  return out
+}

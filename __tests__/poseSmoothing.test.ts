@@ -163,12 +163,9 @@ describe('smoothFrames', () => {
     expect(result[0].frame_index).toBe(1)
   })
 
-  it('applies EMA smoothing - coordinates converge toward new data', () => {
-    const alpha = 0.7
-    // With lookahead=1, seed is just the first frame (legacy behavior).
-    // Frame 0: landmark at (0.2, 0.2)
-    // Frame 1: landmark at (0.8, 0.8)
-    // After EMA: 0.7 * 0.8 + 0.3 * 0.2 = 0.62
+  it('smoothed output moves toward new data each step (one euro)', () => {
+    // With a low cutoff, smoothed output should sit between the previous
+    // state and the fresh measurement.
     const frame0 = makeFrame(0, [
       { x: 0.2, y: 0.2, visibility: 1 },
       { x: 0.8, y: 0.8, visibility: 1 },
@@ -177,23 +174,28 @@ describe('smoothFrames', () => {
       { x: 0.8, y: 0.8, visibility: 1 },
       { x: 0.2, y: 0.2, visibility: 1 },
     ])
-    const result = smoothFrames([frame0, frame1], { alpha, warmupDiscard: 0, lookaheadWindow: 1 })
+    const result = smoothFrames([frame0, frame1], {
+      warmupDiscard: 0,
+      lookaheadWindow: 1,
+      minCutoff: 1.0,
+      beta: 0.007,
+      dcutoff: 1.0,
+    })
     expect(result.length).toBe(2)
 
-    // First frame should be unsmoothed (seed = first frame itself)
-    expect(result[0].landmarks[0].x).toBeCloseTo(0.2)
+    // First frame stays close to its raw value.
+    expect(result[0].landmarks[0].x).toBeCloseTo(0.2, 2)
 
-    // Second frame: EMA(0.8, prev=0.2, alpha=0.7) = 0.62
-    expect(result[1].landmarks[0].x).toBeCloseTo(0.62)
-    expect(result[1].landmarks[0].y).toBeCloseTo(0.62)
+    // Second frame output lies between previous (0.2) and new (0.8).
+    const x1 = result[1].landmarks[0].x
+    expect(x1).toBeGreaterThan(0.2)
+    expect(x1).toBeLessThan(0.8)
   })
 
-  it('look-ahead seeding averages initial frames for stable EMA start', () => {
-    const alpha = 0.7
+  it('look-ahead seeding produces a stable first frame', () => {
     // With lookaheadWindow=2, seed = average of frame0 and frame1.
-    // Landmark 0: seed x = (0.2+0.8)/2 = 0.5
-    // Frame 0 smoothed: 0.7*0.2 + 0.3*0.5 = 0.29
-    // Frame 1 smoothed: 0.7*0.8 + 0.3*0.29 = 0.647
+    // Seed for landmark 0 x = (0.2+0.8)/2 = 0.5. First-frame output is pulled
+    // from the seed toward the raw 0.2 measurement.
     const frame0 = makeFrame(0, [
       { x: 0.2, y: 0.2, visibility: 1 },
       { x: 0.8, y: 0.8, visibility: 1 },
@@ -202,14 +204,17 @@ describe('smoothFrames', () => {
       { x: 0.8, y: 0.8, visibility: 1 },
       { x: 0.2, y: 0.2, visibility: 1 },
     ])
-    const result = smoothFrames([frame0, frame1], { alpha, warmupDiscard: 0, lookaheadWindow: 2 })
+    const result = smoothFrames([frame0, frame1], {
+      warmupDiscard: 0,
+      lookaheadWindow: 2,
+    })
     expect(result.length).toBe(2)
 
-    // First frame is smoothed toward the seed (avg of both frames)
-    expect(result[0].landmarks[0].x).toBeCloseTo(0.29)
-
-    // Second frame: EMA(0.8, prev=0.29, alpha=0.7) = 0.647
-    expect(result[1].landmarks[0].x).toBeCloseTo(0.647)
+    // The smoothed first-frame x for landmark 0 should land between the seed
+    // (0.5) and the measurement (0.2).
+    const x0 = result[0].landmarks[0].x
+    expect(x0).toBeGreaterThan(0.2)
+    expect(x0).toBeLessThan(0.5)
   })
 
   it('recomputes joint_angles from smoothed landmarks', () => {
@@ -258,7 +263,7 @@ describe('smoothFrames', () => {
     expect(typeof angles.right_elbow).toBe('number')
   })
 
-  it('respects custom alpha parameter', () => {
+  it('higher minCutoff reduces lag (more responsive)', () => {
     const frame0 = makeFrame(0, [
       { x: 0.0, y: 0.0, visibility: 1 },
       { x: 1.0, y: 1.0, visibility: 1 },
@@ -268,20 +273,23 @@ describe('smoothFrames', () => {
       { x: 0.0, y: 0.0, visibility: 1 },
     ])
 
-    // With alpha=1.0 (no smoothing), second frame should be exact
-    const noSmooth = smoothFrames([frame0, frame1], {
-      alpha: 1.0,
+    const responsive = smoothFrames([frame0, frame1], {
       warmupDiscard: 0,
       lookaheadWindow: 1,
+      minCutoff: 100,
+      dcutoff: 100,
     })
-    expect(noSmooth[1].landmarks[0].x).toBeCloseTo(1.0)
+    const sluggish = smoothFrames([frame0, frame1], {
+      warmupDiscard: 0,
+      lookaheadWindow: 1,
+      minCutoff: 0.1,
+      dcutoff: 0.1,
+    })
 
-    // With alpha=0.5 and lookahead=1, second frame x = 0.5*1.0 + 0.5*0.0 = 0.5
-    const halfSmooth = smoothFrames([frame0, frame1], {
-      alpha: 0.5,
-      warmupDiscard: 0,
-      lookaheadWindow: 1,
-    })
-    expect(halfSmooth[1].landmarks[0].x).toBeCloseTo(0.5)
+    // The responsive filter should track the new measurement (1.0) closer
+    // than the sluggish one.
+    const responsiveDelta = Math.abs(responsive[1].landmarks[0].x - 1.0)
+    const sluggishDelta = Math.abs(sluggish[1].landmarks[0].x - 1.0)
+    expect(responsiveDelta).toBeLessThan(sluggishDelta)
   })
 })

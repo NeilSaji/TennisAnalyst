@@ -9,3 +9,7 @@ supabase==2.8.1
 python-multipart==0.0.9
 python-dotenv==1.0.1
 scenedetect[opencv]>=0.6.4
+# Pinned: ultralytics==8.3.40 bundles a specific yolo11n.pt checkpoint, so
+# pinning the package effectively pins the weights we ship to Railway.
+ultralytics==8.3.40
+onnxruntime>=1.18.0

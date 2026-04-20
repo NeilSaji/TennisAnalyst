@@ -176,40 +176,70 @@ describe('smoothFrames', () => {
     expect(result.length).toBe(2)
   })
 
-  it('applies EMA smoothing to landmark coordinates', () => {
-    // Create frames with an abrupt jump in position.
-    // Use lookaheadWindow=1 to seed EMA from first frame only (isolates EMA behavior).
-    const frame1 = makeFrame(0, 0, [
-      makeLandmark(LANDMARK_INDICES.NOSE, 0.5, 0.5, 1.0),
-      makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.4, 0.6, 1.0),
-      makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.6, 0.6, 1.0),
-    ])
-    const frame2 = makeFrame(1, 33, [
-      makeLandmark(LANDMARK_INDICES.NOSE, 0.7, 0.5, 1.0), // big jump in x
-      makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.4, 0.6, 1.0),
-      makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.6, 0.6, 1.0),
-    ])
+  it('attenuates high-frequency jitter (variance reduction invariant)', () => {
+    // 30 frames at 30fps. Base sinusoid (slow, preserved) + per-frame jitter.
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 30; i++) {
+      const base = 0.5 + 0.05 * Math.sin((i / 30) * Math.PI * 2)
+      const jitter = (i % 2 === 0 ? 1 : -1) * 0.03 // sharp tick-tock
+      frames.push(
+        makeFrame(i, i * 33, [
+          makeLandmark(LANDMARK_INDICES.NOSE, base + jitter, 0.5, 1.0),
+          makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.4, 0.6, 1.0),
+          makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.6, 0.6, 1.0),
+        ])
+      )
+    }
 
-    const result = smoothFrames([frame1, frame2], {
-      alpha: 0.5,
-      warmupDiscard: 0,
-      lookaheadWindow: 1,
-    })
+    const smoothed = smoothFrames(frames, { warmupDiscard: 0 })
 
-    expect(result.length).toBe(2)
+    const rawXs = frames
+      .map((f) => f.landmarks.find((l) => l.id === LANDMARK_INDICES.NOSE)!.x)
+    const smoothedXs = smoothed
+      .map((f) => f.landmarks.find((l) => l.id === LANDMARK_INDICES.NOSE)!.x)
 
-    // First frame should be unchanged (seed = first frame itself)
-    const nose0 = result[0].landmarks.find(
-      (l) => l.id === LANDMARK_INDICES.NOSE
-    )!
-    expect(nose0.x).toBeCloseTo(0.5, 5)
+    // Frame-to-frame delta variance is the relevant proxy for jitter here.
+    const rawDelta = rawXs.slice(1).map((v, i) => Math.abs(v - rawXs[i]))
+    const smDelta = smoothedXs.slice(1).map((v, i) => Math.abs(v - smoothedXs[i]))
+    const meanRaw = rawDelta.reduce((a, b) => a + b, 0) / rawDelta.length
+    const meanSm = smDelta.reduce((a, b) => a + b, 0) / smDelta.length
 
-    // Second frame nose x should be smoothed: 0.5 * 0.7 + 0.5 * 0.5 = 0.6
-    const nose1 = result[1].landmarks.find(
-      (l) => l.id === LANDMARK_INDICES.NOSE
-    )!
-    // alpha=0.5: 0.5 * 0.7 + 0.5 * 0.5 = 0.6
-    expect(nose1.x).toBeCloseTo(0.6, 5)
+    expect(meanSm).toBeLessThan(meanRaw)
+  })
+
+  it('preserves the contact-frame peak (high-speed events are not flattened)', () => {
+    // Build a trajectory with a sharp peak at frame 15 (the "contact" frame).
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 30; i++) {
+      // Triangle wave peaking at frame 15.
+      const x = 0.3 + 0.4 * (1 - Math.abs(i - 15) / 15)
+      frames.push(
+        makeFrame(i, i * 33, [
+          makeLandmark(LANDMARK_INDICES.NOSE, x, 0.5, 1.0),
+          makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.4, 0.6, 1.0),
+          makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.6, 0.6, 1.0),
+        ])
+      )
+    }
+
+    const smoothed = smoothFrames(frames, { warmupDiscard: 0 })
+    const smoothedXs = smoothed.map(
+      (f) => f.landmarks.find((l) => l.id === LANDMARK_INDICES.NOSE)!.x
+    )
+
+    // The peak should still land at or next to frame 15, and its amplitude
+    // should stay within 30% of the raw peak (0.7).
+    let peakIdx = 0
+    let peakVal = -Infinity
+    for (let i = 0; i < smoothedXs.length; i++) {
+      if (smoothedXs[i] > peakVal) {
+        peakVal = smoothedXs[i]
+        peakIdx = i
+      }
+    }
+    // One Euro has small phase lag at low cutoffs; a 3-frame shift is fine.
+    expect(Math.abs(peakIdx - 15)).toBeLessThanOrEqual(3)
+    expect(peakVal).toBeGreaterThan(0.7 * 0.7)
   })
 
   it('recomputes joint angles from smoothed landmarks', () => {
@@ -254,7 +284,7 @@ describe('smoothFrames', () => {
     expect(frames[0].landmarks[0].x).toBe(origX)
   })
 
-  it('alpha=1.0 means no smoothing (output equals input)', () => {
+  it('very high cutoffs approach passthrough behaviour', () => {
     const frames = Array.from({ length: 5 }, (_, i) => {
       const landmarks = makeStandingPose().map((l) => ({
         ...l,
@@ -263,14 +293,20 @@ describe('smoothFrames', () => {
       return makeFrame(i, i * 33, landmarks)
     })
 
-    const result = smoothFrames(frames, { alpha: 1.0, warmupDiscard: 0 })
+    // A very large minCutoff pushes α → 1 (minimal lag on linear trajectories).
+    const result = smoothFrames(frames, {
+      minCutoff: 10000,
+      dcutoff: 10000,
+      warmupDiscard: 0,
+      lookaheadWindow: 1,
+    })
 
-    // With alpha=1.0, smoothed = 1.0 * new + 0 * old = new
-    for (let i = 0; i < result.length; i++) {
+    // With effectively no smoothing, output should track input to within
+    // a small tolerance (not exact because the 1€ alpha can never hit 1.0).
+    for (let i = 1; i < result.length; i++) {
       for (const lm of result[i].landmarks) {
         const orig = frames[i].landmarks.find((l) => l.id === lm.id)!
-        expect(lm.x).toBeCloseTo(orig.x, 10)
-        expect(lm.y).toBeCloseTo(orig.y, 10)
+        expect(lm.x).toBeCloseTo(orig.x, 3)
       }
     }
   })

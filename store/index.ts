@@ -81,9 +81,14 @@ interface JointStore {
   visible: VisibilityMap
   showSkeleton: boolean
   showTrail: boolean
+  // Racket-head trail (schema_version 2 clips only). Kept separate from the
+  // JointGroup visibility map so existing `visible: Record<JointGroup, boolean>`
+  // consumers stay untouched.
+  showRacket: boolean
   toggleJoint: (group: JointGroup) => void
   toggleSkeleton: () => void
   toggleTrail: () => void
+  toggleRacket: () => void
   setAllVisible: (v: boolean) => void
   setVisibility: (map: VisibilityMap) => void
 }
@@ -101,6 +106,9 @@ export const useJointStore = create<JointStore>((set) => ({
   visible: { ...defaultVisible },
   showSkeleton: true,
   showTrail: true,
+  // On by default: racket tracking is the headline user-facing feature. The
+  // tracer silently no-ops on legacy clips where `racket_head` is absent.
+  showRacket: true,
   toggleJoint: (group) =>
     set((state) => ({
       visible: { ...state.visible, [group]: !state.visible[group] },
@@ -108,6 +116,7 @@ export const useJointStore = create<JointStore>((set) => ({
   toggleSkeleton: () =>
     set((state) => ({ showSkeleton: !state.showSkeleton })),
   toggleTrail: () => set((state) => ({ showTrail: !state.showTrail })),
+  toggleRacket: () => set((state) => ({ showRacket: !state.showRacket })),
   setAllVisible: (v) =>
     set({
       visible: Object.fromEntries(

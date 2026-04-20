@@ -32,27 +32,46 @@ export function renderPose(
 ): void {
   const { visible, showSkeleton, color, skeletonColor, scale = 1 } = options
 
-  // Build a map of landmark id -> pixel coords
-  const pixelMap = new Map<number, { x: number; y: number }>()
+  // Build a map of landmark id -> pixel coords + visibility (for opacity).
+  // Skip entirely below 0.3; above, caller fades by (vis - 0.3) / 0.7.
+  const pixelMap = new Map<
+    number,
+    { x: number; y: number; visibility: number }
+  >()
   for (const lm of frame.landmarks) {
     if (lm.visibility < 0.3) continue
     pixelMap.set(lm.id, {
       x: lm.x * canvasWidth,
       y: lm.y * canvasHeight,
+      visibility: lm.visibility,
     })
   }
 
-  // Draw skeleton lines
+  // Draw skeleton bones with halo (dark outline first, then colored stroke
+  // on top). Makes bones readable on both bright and dark backgrounds.
   if (showSkeleton) {
     ctx.save()
-    ctx.globalAlpha = 0.6 * scale
-    ctx.strokeStyle = skeletonColor ?? 'rgba(255,255,255,0.7)'
-    ctx.lineWidth = 2
+    const baseWidth = 2
+    const strokeColor = skeletonColor ?? 'rgba(255,255,255,0.7)'
 
     for (const [fromId, toId] of SKELETON_CONNECTIONS) {
       const from = pixelMap.get(fromId)
       const to = pixelMap.get(toId)
       if (!from || !to) continue
+
+      // Halo pass
+      ctx.globalAlpha = 0.6 * scale
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)'
+      ctx.lineWidth = baseWidth + 2
+      ctx.beginPath()
+      ctx.moveTo(from.x, from.y)
+      ctx.lineTo(to.x, to.y)
+      ctx.stroke()
+
+      // Colored pass on top
+      ctx.globalAlpha = 0.6 * scale
+      ctx.strokeStyle = strokeColor
+      ctx.lineWidth = baseWidth
       ctx.beginPath()
       ctx.moveTo(from.x, from.y)
       ctx.lineTo(to.x, to.y)
@@ -61,17 +80,20 @@ export function renderPose(
     ctx.restore()
   }
 
-  // Draw joint dots per group
+  // Draw joint dots per group with continuous opacity by visibility.
   for (const [group, ids] of Object.entries(JOINT_GROUPS) as unknown as [JointGroup, number[]][]) {
     if (!visible[group]) continue
 
     const dotColor = color ?? JOINT_GROUP_COLORS[group]
     ctx.save()
-    ctx.globalAlpha = 0.9 * scale
 
     for (const id of ids) {
       const pos = pixelMap.get(id)
       if (!pos) continue
+
+      // Fade joints smoothly through 0.3 -> 1.0 visibility rather than popping.
+      const vAlpha = Math.max(0, Math.min(1, (pos.visibility - 0.3) / 0.7))
+      ctx.globalAlpha = 0.9 * scale * vAlpha
 
       // Outer ring
       ctx.beginPath()
@@ -91,6 +113,7 @@ export function renderPose(
       ctx.fillStyle = 'white'
       ctx.fill()
     }
+    ctx.globalAlpha = 1
     ctx.restore()
   }
 }
@@ -149,24 +172,39 @@ export function renderPoseZoomed(
     y: ((y - bounds.minY) / bh) * canvasHeight,
   })
 
-  // Build pixel map
-  const pixelMap = new Map<number, { x: number; y: number }>()
+  // Build pixel map keyed by id, with visibility preserved for opacity fade.
+  const pixelMap = new Map<
+    number,
+    { x: number; y: number; visibility: number }
+  >()
   for (const lm of frame.landmarks) {
     if (lm.visibility < 0.3) continue
-    pixelMap.set(lm.id, toPixel(lm.x, lm.y))
+    const p = toPixel(lm.x, lm.y)
+    pixelMap.set(lm.id, { x: p.x, y: p.y, visibility: lm.visibility })
   }
 
-  // Draw skeleton lines
+  // Draw skeleton bones with halo outline.
   if (showSkeleton) {
     ctx.save()
-    ctx.globalAlpha = 0.6 * scale
-    ctx.strokeStyle = skeletonColor ?? 'rgba(255,255,255,0.7)'
-    ctx.lineWidth = 3
+    const baseWidth = 3
+    const strokeColor = skeletonColor ?? 'rgba(255,255,255,0.7)'
 
     for (const [fromId, toId] of SKELETON_CONNECTIONS) {
       const from = pixelMap.get(fromId)
       const to = pixelMap.get(toId)
       if (!from || !to) continue
+
+      ctx.globalAlpha = 0.6 * scale
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)'
+      ctx.lineWidth = baseWidth + 2
+      ctx.beginPath()
+      ctx.moveTo(from.x, from.y)
+      ctx.lineTo(to.x, to.y)
+      ctx.stroke()
+
+      ctx.globalAlpha = 0.6 * scale
+      ctx.strokeStyle = strokeColor
+      ctx.lineWidth = baseWidth
       ctx.beginPath()
       ctx.moveTo(from.x, from.y)
       ctx.lineTo(to.x, to.y)
@@ -175,17 +213,19 @@ export function renderPoseZoomed(
     ctx.restore()
   }
 
-  // Draw joint dots per group
+  // Draw joint dots with confidence-modulated opacity.
   for (const [group, ids] of Object.entries(JOINT_GROUPS) as unknown as [JointGroup, number[]][]) {
     if (!visible[group]) continue
 
     const dotColor = color ?? JOINT_GROUP_COLORS[group]
     ctx.save()
-    ctx.globalAlpha = 0.9 * scale
 
     for (const id of ids) {
       const pos = pixelMap.get(id)
       if (!pos) continue
+
+      const vAlpha = Math.max(0, Math.min(1, (pos.visibility - 0.3) / 0.7))
+      ctx.globalAlpha = 0.9 * scale * vAlpha
 
       // Outer ring
       ctx.beginPath()
@@ -205,6 +245,7 @@ export function renderPoseZoomed(
       ctx.fillStyle = 'white'
       ctx.fill()
     }
+    ctx.globalAlpha = 1
     ctx.restore()
   }
 }

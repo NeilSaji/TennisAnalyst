@@ -392,6 +392,7 @@ describe('useJointStore', () => {
       },
       showSkeleton: true,
       showTrail: true,
+      showRacket: true,
     })
   })
 
@@ -437,6 +438,14 @@ describe('useJointStore', () => {
     expect(useJointStore.getState().showTrail).toBe(false)
     useJointStore.getState().toggleTrail()
     expect(useJointStore.getState().showTrail).toBe(true)
+  })
+
+  it('showRacket is true by default and toggleRacket flips it', () => {
+    expect(useJointStore.getState().showRacket).toBe(true)
+    useJointStore.getState().toggleRacket()
+    expect(useJointStore.getState().showRacket).toBe(false)
+    useJointStore.getState().toggleRacket()
+    expect(useJointStore.getState().showRacket).toBe(true)
   })
 
   it('setAllVisible(false) turns off everything', () => {

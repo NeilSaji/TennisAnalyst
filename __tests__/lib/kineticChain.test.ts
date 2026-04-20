@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   analyzeKineticChain,
   FOREHAND_KINETIC_CHAIN,
+  getChainTimings,
   type KineticChainResult,
 } from '@/lib/kineticChain'
 import type { PoseFrame, JointAngles } from '@/lib/supabase'
@@ -288,10 +289,53 @@ describe('analyzeKineticChain', () => {
 // FOREHAND_KINETIC_CHAIN
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// getChainTimings
+// ---------------------------------------------------------------------------
+
+describe('getChainTimings', () => {
+  it('returns peak timestamps in the order the shot config defines', () => {
+    const frames = makeCorrectSequenceFrames(40)
+    const timings = getChainTimings(frames, 'forehand')
+
+    // At least hips/trunk/shoulder/elbow should resolve for this synthetic data.
+    expect(timings.length).toBeGreaterThanOrEqual(2)
+
+    // Every timing must be a valid ms within the clip's duration.
+    const maxTs = frames[frames.length - 1].timestamp_ms
+    for (const t of timings) {
+      expect(t.peakMs).toBeGreaterThanOrEqual(0)
+      expect(t.peakMs).toBeLessThanOrEqual(maxTs)
+      expect(typeof t.joint).toBe('string')
+    }
+
+    // Hips peak should arrive before the shoulder peak (proximal-to-distal).
+    const hips = timings.find((t) => t.joint === 'hip_rotation')
+    const shoulder = timings.find((t) => t.joint === 'right_shoulder')
+    if (hips && shoulder) {
+      expect(hips.peakMs).toBeLessThan(shoulder.peakMs)
+    }
+  })
+
+  it('omits links with no detectable peak', () => {
+    // Only hip_rotation has any motion; the rest stay flat.
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 20; i++) {
+      const angles: JointAngles = {
+        hip_rotation: 10 + (i < 10 ? i * 5 : 50),
+      }
+      frames.push(makeFrame(i, i * 33, makeStandingPose(), angles))
+    }
+
+    const timings = getChainTimings(frames, 'forehand')
+    expect(timings.map((t) => t.joint)).toEqual(['hip_rotation'])
+  })
+})
+
 describe('FOREHAND_KINETIC_CHAIN', () => {
   it('defines the correct proximal-to-distal order', () => {
     const names = FOREHAND_KINETIC_CHAIN.map((c) => c.name)
-    expect(names).toEqual(['hips', 'trunk', 'shoulder', 'elbow'])
+    expect(names).toEqual(['hips', 'trunk', 'shoulder', 'elbow', 'wrist'])
   })
 
   it('maps each segment to a valid JointAngles key', () => {
@@ -300,6 +344,8 @@ describe('FOREHAND_KINETIC_CHAIN', () => {
       'left_elbow',
       'right_shoulder',
       'left_shoulder',
+      'right_wrist',
+      'left_wrist',
       'right_knee',
       'left_knee',
       'right_hip',
