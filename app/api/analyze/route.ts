@@ -19,9 +19,16 @@ export async function POST(request: NextRequest) {
     keypointsJson: inlineKeypoints,
     compareKeypointsJson,
     userFocus,
+    compareMode,
+    baselineLabel,
   } = body
   const focus =
     typeof userFocus === 'string' && userFocus.trim() ? userFocus.trim() : null
+  const isBaselineCompare = compareMode === 'baseline'
+  const baselineTag =
+    typeof baselineLabel === 'string' && baselineLabel.trim()
+      ? baselineLabel.trim().slice(0, 80)
+      : 'your best day'
 
   // Get pro swing data if proSwingId is provided
   let proSwing: { keypoints_json?: KeypointsJson; pros?: { name: string }; shot_type?: string } | null = null
@@ -169,32 +176,67 @@ Keep it under 350 words. Sound like a coach who's watched a lot of ${proName} an
   } else if (compareSummary) {
     // Self-compare mode: same player, two takes. Coach for CONSISTENCY —
     // spot what's drifting between the two swings rather than rebuilding either.
+    //
+    // Baseline variant (compareMode === 'baseline'): same data plumbing, but
+    // the framing shifts from "two takes side by side" to "best day vs today".
+    // Everything else (rules, voice, biomechanics reference) is identical.
     const soloRef = getBiomechanicsReference('all')
 
-    prompt = `You are a tennis coach watching the same player hit two different swings back to back. Your job is consistency — help them spot what's staying the same and what's drifting between takes.
+    const framingParagraph = isBaselineCompare
+      ? `You are a tennis coach helping a player compare today's swing against their best-day baseline ("${baselineTag}"). Your job is progress tracking — show them what's held up since that peak, what's drifted, and how to lock the good stuff back in.`
+      : `You are a tennis coach watching the same player hit two different swings back to back. Your job is consistency — help them spot what's staying the same and what's drifting between takes.`
+
+    const anchorRule = isBaselineCompare
+      ? `- Do NOT suggest rebuilds. The baseline IS the anchor — anywhere today's swing drifts from "${baselineTag}", coach them back toward how they moved on their best day.`
+      : `- Do NOT suggest rebuilds. Both swings come from the same player, so pick the cleaner take as the anchor and talk about matching to it.`
+
+    const specificExample = isBaselineCompare
+      ? `- Be SPECIFIC about differences: "your hips turned further on your best day but today your arm got ahead of them", not "your swing looks different".`
+      : `- Be SPECIFIC about differences: "your hips turned further in take 1 but your arm lagged behind in take 2", not "your swing was inconsistent".`
+
+    const leftLabel = isBaselineCompare ? `BEST-DAY BASELINE ("${baselineTag}") DATA` : 'TAKE 1 DATA'
+    const rightLabel = isBaselineCompare ? 'TODAY DATA' : 'TAKE 2 DATA'
+
+    const heldUpHeading = isBaselineCompare ? "What's Held Up From Your Best Day" : "What's Consistent"
+    const driftingHeading = isBaselineCompare ? "What's Drifted" : "What's Drifting"
+    const lockItHeading = isBaselineCompare ? 'Lock It Back In' : 'Lock It In'
+
+    const heldUpBody = isBaselineCompare
+      ? `Two or three sentences on what today's swing kept from the best-day baseline. Reinforce what's still working.`
+      : `Two or three sentences on what they're doing the same in both takes. Reinforce what's working.`
+
+    const driftingItemBody = isBaselineCompare
+      ? `What changed from the best day to today, which version looked cleaner, and one feel-based cue to get back to best-day quality.`
+      : `What changed between the two takes, which take was cleaner, and one feel-based cue to anchor the next swing.`
+
+    const lockItBody = isBaselineCompare
+      ? `Two short sentences on what to groove next session so today's swing matches your best day again.`
+      : `Two short sentences on what to groove next session so these swings match.`
+
+    prompt = `${framingParagraph}
 ${focusBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
 - NEVER rate or score the player. No X/100, no percentages, no grades.
 - NEVER use em dashes. Use commas or periods.
-- Do NOT suggest rebuilds. Both swings come from the same player, so pick the cleaner take as the anchor and talk about matching to it.
-- Be SPECIFIC about differences: "your hips turned further in take 1 but your arm lagged behind in take 2", not "your swing was inconsistent".
+${anchorRule}
+${specificExample}
 
 Use the data below to understand what's happening, but ONLY talk in coaching language.
 
 REFERENCE: ${soloRef}
-TAKE 1 DATA: ${userSummary}
-TAKE 2 DATA: ${compareSummary}
+${leftLabel}: ${userSummary}
+${rightLabel}: ${compareSummary}
 
 Respond in this format:
 
-## What's Consistent
-Two or three sentences on what they're doing the same in both takes. Reinforce what's working.
+## ${heldUpHeading}
+${heldUpBody}
 
-## What's Drifting
+## ${driftingHeading}
 
 **1. [specific element]**
-What changed between the two takes, which take was cleaner, and one feel-based cue to anchor the next swing.
+${driftingItemBody}
 
 **2. [specific element]**
 Same structure.
@@ -202,8 +244,8 @@ Same structure.
 **3. [specific element]**
 Same structure.
 
-## Lock It In
-Two short sentences on what to groove next session so these swings match.
+## ${lockItHeading}
+${lockItBody}
 
 Keep it under 350 words. Sound like a coach helping them tighten up.`
   } else {

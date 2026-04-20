@@ -17,27 +17,20 @@ const FEATURES = [
     desc: 'Show or hide individual joint groups to focus on what matters for your shot.',
   },
   {
-    icon: '⚡',
-    title: 'Pro Comparison',
-    desc: 'Overlay your skeleton on Federer, Nadal, Djokovic and more. See the difference instantly.',
+    icon: '📌',
+    title: 'Save a Baseline',
+    desc: 'Mark your best-day swing as a baseline. Compare every future session against it.',
   },
   {
     icon: '🤖',
     title: 'AI Coaching',
-    desc: 'Claude analyzes your joint angles vs the pro and gives you ranked, actionable coaching cues.',
+    desc: 'Claude reads your joint angles vs your best day and tells you what held up and what drifted.',
   },
   {
     icon: '📐',
     title: 'Side by Side',
-    desc: 'Synchronized video playback. Scrub both videos in lockstep at any speed.',
+    desc: 'Synchronized video playback. Scrub both swings in lockstep at any speed.',
   },
-]
-
-const PROS = [
-  { name: 'Roger Federer', flag: '🇨🇭', shots: ['Forehand', 'Serve'] },
-  { name: 'Rafael Nadal', flag: '🇪🇸', shots: ['Forehand', 'Backhand'] },
-  { name: 'Novak Djokovic', flag: '🇷🇸', shots: ['Return', 'Serve'] },
-  { name: 'Serena Williams', flag: '🇺🇸', shots: ['Serve', 'Forehand'] },
 ]
 
 export default function HomePage() {
@@ -53,16 +46,16 @@ export default function HomePage() {
           </div>
 
           <h1 className="text-5xl md:text-7xl font-black text-white leading-tight mb-6">
-            Play like
+            Beat your
             <br />
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
-              the pros
+              last swing.
             </span>
           </h1>
 
           <p className="text-white/60 text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
-            Upload your swing video. Get instant AI pose tracking, joint-by-joint comparison to
-            professional players, and personalized coaching feedback.
+            AI pose tracking for every swing you record. See your technique get sharper,
+            more consistent, more powerful — week over week.
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -73,10 +66,10 @@ export default function HomePage() {
               Analyze My Swing
             </Link>
             <Link
-              href="/pros"
+              href="/baseline"
               className="px-8 py-4 bg-white/10 hover:bg-white/15 text-white font-bold rounded-2xl text-lg transition-all border border-white/10"
             >
-              Browse Pro Database
+              My Baselines
             </Link>
           </div>
         </div>
@@ -109,8 +102,8 @@ export default function HomePage() {
             {[
               { n: '1', label: 'Upload', desc: 'Drop your swing video (MP4/MOV)' },
               { n: '2', label: 'Track', desc: 'AI extracts 33 joint landmarks from every frame' },
-              { n: '3', label: 'Compare', desc: 'Pick a pro and shot type to compare against' },
-              { n: '4', label: 'Improve', desc: 'Get ranked coaching cues from Claude' },
+              { n: '3', label: 'Pin a baseline', desc: 'Mark your best swing as the reference' },
+              { n: '4', label: 'Beat it', desc: 'Upload future swings and see what changed' },
             ].map((step) => (
               <div key={step.n} className="flex flex-col items-center gap-3">
                 <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-black text-xl">
@@ -121,38 +114,6 @@ export default function HomePage() {
               </div>
             ))}
           </div>
-        </div>
-      </section>
-
-      {/* Pro database preview */}
-      <section className="max-w-5xl mx-auto px-4 py-20">
-        <div className="flex items-center justify-between mb-8">
-          <h2 className="text-3xl font-bold text-white">Pro Database</h2>
-          <Link href="/pros" className="text-emerald-400 hover:text-emerald-300 text-sm font-medium">
-            View all →
-          </Link>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {PROS.map((pro) => (
-            <Link
-              key={pro.name}
-              href="/pros"
-              className="rounded-2xl border border-white/10 bg-white/5 p-5 hover:bg-white/[0.08] transition-colors"
-            >
-              <div className="text-3xl mb-3">{pro.flag}</div>
-              <h3 className="text-white font-semibold text-sm mb-2">{pro.name}</h3>
-              <div className="flex flex-wrap gap-1">
-                {pro.shots.map((s) => (
-                  <span
-                    key={s}
-                    className="text-xs bg-white/10 text-white/60 px-2 py-0.5 rounded-full"
-                  >
-                    {s}
-                  </span>
-                ))}
-              </div>
-            </Link>
-          ))}
         </div>
       </section>
 

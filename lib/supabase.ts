@@ -20,13 +20,21 @@ export function getSupabase(): SupabaseClient {
 
 // Service-role client for server-side admin operations (bypasses RLS).
 // Only use in API routes that run exclusively on the server.
+//
+// Supports both the new sb_secret_... key format and the legacy service-role
+// JWT, checked in that order. Accepts either SUPABASE_SECRETKEY or
+// SUPABASE_SECRET_KEY for the new-format key so users don't get tripped up
+// by the underscore.
 export function getSupabaseAdmin(): SupabaseClient {
   if (!_adminClient) {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const key = process.env.SUPABASE_SERVICE_KEY
+    const key =
+      process.env.SUPABASE_SECRETKEY ??
+      process.env.SUPABASE_SECRET_KEY ??
+      process.env.SUPABASE_SERVICE_KEY
     if (!url || !key) {
       throw new Error(
-        'Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_KEY env vars'
+        'Missing NEXT_PUBLIC_SUPABASE_URL or a server key (SUPABASE_SECRETKEY / SUPABASE_SECRET_KEY / SUPABASE_SERVICE_KEY)'
       )
     }
     _adminClient = createClient(url, key)
@@ -136,6 +144,20 @@ export type UserSession = {
   segment_count: number
   created_at: string
   expires_at: string
+}
+
+export type Baseline = {
+  id: string
+  device_id: string
+  user_id: string | null
+  label: string
+  shot_type: 'forehand' | 'backhand' | 'serve' | 'volley' | 'slice'
+  blob_url: string
+  keypoints_json: KeypointsJson
+  source_session_id: string | null
+  is_active: boolean
+  created_at: string
+  replaced_at: string | null
 }
 
 export type VideoSegment = {

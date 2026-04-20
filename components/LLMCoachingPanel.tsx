@@ -6,14 +6,17 @@ import type { ProSwing, PoseFrame } from '@/lib/supabase'
 
 interface LLMCoachingPanelProps {
   proSwing: ProSwing | null
-  compareMode?: 'pro' | 'custom'
+  compareMode?: 'pro' | 'custom' | 'baseline'
   frames?: PoseFrame[]
-  // Second-take frames. When present in 'custom' mode, analyze runs in
-  // self-compare mode (consistency check between the two takes).
+  // Second-take frames. When present in 'custom' or 'baseline' mode,
+  // analyze runs as a user-vs-user comparison (consistency / best-day drift).
   compareFrames?: PoseFrame[]
+  // Shown when compareMode === 'baseline'. Wired to the prompt so coaching
+  // references the specific baseline by name.
+  baselineLabel?: string
 }
 
-export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames, compareFrames }: LLMCoachingPanelProps) {
+export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames, compareFrames, baselineLabel }: LLMCoachingPanelProps) {
   const [open, setOpen] = useState(false)
   const { feedback, loading, setFeedback, appendFeedback, setLoading, reset } =
     useAnalysisStore()
@@ -33,7 +36,7 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
 
   const canAnalyze =
     framesData.length > 0 &&
-    (compareMode === 'custom' || proSwing !== null)
+    (compareMode === 'custom' || compareMode === 'baseline' || proSwing !== null)
 
   const sendChatMessage = async () => {
     const text = chatInput.trim()
@@ -97,10 +100,13 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
       frames: effectiveFrames,
     }
 
-    // Pass the second take only in custom-compare mode. In pro mode, the pro
-    // reference wins even if compareFrames happens to be set.
+    // Pass the second take only in user-vs-user modes (custom or baseline).
+    // In pro mode the pro reference wins even if compareFrames is set.
     const compareKeypointsJson =
-      compareMode === 'custom' && !proSwing && compareFrames && compareFrames.length > 0
+      (compareMode === 'custom' || compareMode === 'baseline') &&
+      !proSwing &&
+      compareFrames &&
+      compareFrames.length > 0
         ? {
             fps_sampled: 30,
             frame_count: compareFrames.length,
@@ -120,6 +126,7 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
           keypointsJson,
           ...(compareKeypointsJson ? { compareKeypointsJson } : {}),
           ...(trimmedFocus ? { userFocus: trimmedFocus } : {}),
+          ...(compareMode === 'baseline' ? { compareMode: 'baseline', baselineLabel } : {}),
         }),
       })
 
@@ -161,6 +168,10 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
             <span className="text-xs text-white/40">
               vs {proSwing.pros?.name ?? 'Pro'} · {proSwing.shot_type}
             </span>
+          ) : compareMode === 'baseline' ? (
+            <span className="text-xs text-white/40">
+              vs {baselineLabel ?? 'your best day'}
+            </span>
           ) : compareMode === 'custom' ? (
             <span className="text-xs text-white/40">
               Form Analysis
@@ -200,7 +211,7 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
       </div>
 
       {/* Hint when disabled due to no pro selected */}
-      {!canAnalyze && !loading && !feedback && framesData.length > 0 && compareMode !== 'custom' && !proSwing && (
+      {!canAnalyze && !loading && !feedback && framesData.length > 0 && compareMode !== 'custom' && compareMode !== 'baseline' && !proSwing && (
         <div className="px-4 py-2 bg-white/[0.02]">
           <p className="text-white/40 text-xs">Select a pro player above to compare against</p>
         </div>
@@ -220,9 +231,11 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
             placeholder={
               proSwing
                 ? `e.g. "working on topspin" or "why does my follow-through look different from ${proSwing.pros?.name ?? 'the pro'}?"`
-                : compareMode === 'custom' && compareFrames?.length
-                  ? `e.g. "why is my second shot flatter?" or "focus on hip rotation"`
-                  : `e.g. "working on topspin" or "am I rotating my hips enough?"`
+                : compareMode === 'baseline' && compareFrames?.length
+                  ? `e.g. "did my hip rotation hold up?" or "focus on follow-through"`
+                  : compareMode === 'custom' && compareFrames?.length
+                    ? `e.g. "why is my second shot flatter?" or "focus on hip rotation"`
+                    : `e.g. "working on topspin" or "am I rotating my hips enough?"`
             }
             rows={2}
             className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/25 focus:outline-none focus:border-emerald-500/40 resize-none"
@@ -237,7 +250,7 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
             <p className="text-white/40 text-sm text-center py-4">
               {framesData.length === 0
                 ? 'Upload a video first to get coaching feedback.'
-                : compareMode === 'custom'
+                : compareMode === 'custom' || compareMode === 'baseline'
                   ? 'Click Analyze Swing for AI coaching on your form.'
                   : 'Select a pro player to compare against.'}
             </p>

@@ -8,8 +8,11 @@ import ProSelector from '@/components/ProSelector'
 import SwingSelector from '@/components/SwingSelector'
 import { usePoseStore, useJointStore, useComparisonStore } from '@/store'
 import { detectSwings } from '@/lib/jointAngles'
+import { useUser } from '@/hooks/useUser'
 import type { SwingSegment } from '@/lib/jointAngles'
 import type { PoseFrame } from '@/lib/supabase'
+
+const VALID_BASELINE_SHOTS = new Set(['forehand', 'backhand', 'serve', 'volley', 'slice'])
 
 // Dynamic import to avoid SSR issues with MediaPipe WASM
 const UploadZone = dynamic(() => import('@/components/UploadZone'), { ssr: false })
@@ -17,12 +20,15 @@ const VideoCanvas = dynamic(() => import('@/components/VideoCanvas'), { ssr: fal
 const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), { ssr: false })
 
 export default function AnalyzePage() {
-  const { framesData, blobUrl, localVideoUrl } = usePoseStore()
+  const { framesData, blobUrl, localVideoUrl, sessionId, shotType } = usePoseStore()
   const { visible, showSkeleton, showTrail } = useJointStore()
   const { activeProSwing } = useComparisonStore()
   const [done, setDone] = useState(false)
   const [allFrames, setAllFrames] = useState<PoseFrame[]>([])
   const [selectedSwing, setSelectedSwing] = useState<number | null>(null)
+  const [baselineStatus, setBaselineStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [baselineError, setBaselineError] = useState<string | null>(null)
+  const { user, loading: authLoading } = useUser()
 
   const swings = useMemo(() => detectSwings(allFrames), [allFrames])
   const hasMultipleSwings = swings.length > 1
@@ -46,6 +52,51 @@ export default function AnalyzePage() {
   const analysisFrames = selectedSwing && swings[selectedSwing - 1]
     ? swings[selectedSwing - 1].frames
     : framesData
+
+  // For baseline saving: multi-swing videos must have one swing selected.
+  // Single-swing videos use all frames directly.
+  const baselineFrames = analysisFrames
+  const canSaveBaseline =
+    done &&
+    !!blobUrl &&
+    !!shotType &&
+    VALID_BASELINE_SHOTS.has(shotType) &&
+    baselineFrames.length > 0 &&
+    (!hasMultipleSwings || selectedSwing !== null)
+
+  const saveAsBaseline = async () => {
+    if (!canSaveBaseline) return
+    setBaselineStatus('saving')
+    setBaselineError(null)
+    try {
+      const keypointsJson = {
+        fps_sampled: 30,
+        frame_count: baselineFrames.length,
+        frames: baselineFrames,
+      }
+      const res = await fetch('/api/baselines', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          blobUrl,
+          shotType,
+          keypointsJson,
+          sourceSessionId: sessionId ?? undefined,
+        }),
+      })
+      if (!res.ok) {
+        const msg = (await res.text()) || `HTTP ${res.status}`
+        setBaselineStatus('error')
+        setBaselineError(msg)
+        return
+      }
+      setBaselineStatus('saved')
+    } catch (err) {
+      setBaselineStatus('error')
+      setBaselineError(err instanceof Error ? err.message : 'Failed to save baseline')
+    }
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -103,18 +154,65 @@ export default function AnalyzePage() {
             <LLMCoachingPanel proSwing={activeProSwing} frames={analysisFrames} />
           )}
 
-          {/* Compare CTA */}
+          {/* Baseline CTA — the main pivot action */}
           {done && (
-            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 flex items-center justify-between">
-              <div>
-                <p className="text-white font-medium text-sm">Ready to compare?</p>
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-white font-medium text-sm">Is this your best day?</p>
                 <p className="text-white/50 text-xs">
-                  Select a pro below, then go to the Compare page for overlay view.
+                  {!authLoading && !user
+                    ? 'Sign in to save this as a baseline and track progress across future swings.'
+                    : hasMultipleSwings && selectedSwing === null
+                      ? 'Pick a single swing above to save it as a baseline.'
+                      : baselineStatus === 'saved'
+                        ? 'Saved. Upload future swings on the baseline compare page to track progress.'
+                        : baselineStatus === 'error'
+                          ? baselineError ?? 'Failed to save baseline.'
+                          : 'Save this as a baseline and compare future swings against it.'}
+                </p>
+              </div>
+              {!authLoading && !user ? (
+                <Link
+                  href="/login?next=/analyze"
+                  className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
+                >
+                  Sign in to save
+                </Link>
+              ) : baselineStatus === 'saved' ? (
+                <Link
+                  href="/baseline/compare"
+                  className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
+                >
+                  Compare new swing →
+                </Link>
+              ) : (
+                <button
+                  onClick={saveAsBaseline}
+                  disabled={!canSaveBaseline || baselineStatus === 'saving'}
+                  className={`px-4 py-2 text-sm font-semibold rounded-lg transition-colors flex-shrink-0 ${
+                    !canSaveBaseline || baselineStatus === 'saving'
+                      ? 'bg-white/10 text-white/40 cursor-not-allowed'
+                      : 'bg-emerald-500 hover:bg-emerald-400 text-white'
+                  }`}
+                >
+                  {baselineStatus === 'saving' ? 'Saving...' : 'Set as baseline'}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Pro compare (legacy path, still works) */}
+          {done && (
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 flex items-center justify-between">
+              <div>
+                <p className="text-white font-medium text-sm">Or compare against a pro</p>
+                <p className="text-white/50 text-xs">
+                  Side-by-side overlay with the pro of your choice.
                 </p>
               </div>
               <Link
                 href="/compare"
-                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
+                className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
               >
                 Compare →
               </Link>

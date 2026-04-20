@@ -8,6 +8,12 @@ vi.mock('next/link', () => ({
   ),
 }))
 
+// Nav reads auth state via useUser(). Don't pull a real Supabase client into
+// the test — we're verifying nav structure, not auth rendering.
+vi.mock('@/hooks/useUser', () => ({
+  useUser: () => ({ user: null, loading: false }),
+}))
+
 describe('Nav', () => {
   it('renders the app name', () => {
     render(<Nav />)
