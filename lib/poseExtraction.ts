@@ -13,10 +13,16 @@ const CROP_CANVAS_SIZE = 512
 // room for the arm/racket to extend outside the initial detection without
 // clipping when we crop for pass 2.
 const CROP_MARGIN = 1.5
-// Don't bother with the second pass if the subject already fills most of
-// the frame — the upscale gains are marginal and the extra detect call
-// doubles extraction time for no benefit.
-const CROP_SKIP_THRESHOLD = 0.85
+// Only skip the second pass when the subject already fills most of the
+// frame (close-up shot). Earlier threshold was 0.85 but a player at
+// ~50-70% of the frame was still benefiting from the upscale, so lower
+// it. Close-ups still skip correctly.
+const CROP_SKIP_THRESHOLD = 0.7
+// Only landmarks above this visibility count toward the pass-1 bbox.
+// On a far/noisy subject, MediaPipe sprays a few spurious "confident"
+// landmarks across the court — a higher gate keeps the bbox centered
+// on the actual player rather than the most confident outlier.
+const CROP_BBOX_VIS_GATE = 0.5
 
 type RawLandmark = { x: number; y: number; z?: number; visibility?: number }
 
@@ -34,7 +40,11 @@ function computeCropRect(landmarks: RawLandmark[]): {
   let maxY = 0
   let any = false
   for (const lm of landmarks) {
-    if ((lm.visibility ?? 0) < 0.3) continue
+    if ((lm.visibility ?? 0) < CROP_BBOX_VIS_GATE) continue
+    // Also exclude extrapolated landmarks outside the frame — MediaPipe
+    // happily projects a wrist below the ground or past the net edge,
+    // and including those pulls the bbox off the player.
+    if (lm.x < 0 || lm.x > 1 || lm.y < 0 || lm.y > 1) continue
     any = true
     if (lm.x < minX) minX = lm.x
     if (lm.y < minY) minY = lm.y
@@ -232,14 +242,26 @@ export async function extractPoseFromVideo(
         }
 
         const landmarks: Landmark[] = finalLandmarks.map(
-          (lm: RawLandmark, id: number) => ({
-            id,
-            name: `landmark_${id}`,
-            x: lm.x,
-            y: lm.y,
-            z: lm.z ?? 0,
-            visibility: lm.visibility ?? 1,
-          }),
+          (lm: RawLandmark, id: number) => {
+            // Force visibility to 0 for landmarks the model predicted
+            // OUTSIDE the frame. MediaPipe will report high "visibility"
+            // for extrapolated joints (e.g., a foot below the bottom of
+            // a cropped frame), but the user doesn't want predictions —
+            // if the joint isn't in view, it should disappear and
+            // reappear when it comes back. The render-side 0.6 cutoff
+            // then drops these entirely.
+            const inFrame =
+              lm.x >= 0 && lm.x <= 1 && lm.y >= 0 && lm.y <= 1
+            const rawVis = lm.visibility ?? 1
+            return {
+              id,
+              name: `landmark_${id}`,
+              x: lm.x,
+              y: lm.y,
+              z: lm.z ?? 0,
+              visibility: inFrame ? rawVis : 0,
+            }
+          },
         )
 
         // Skip low-confidence detections (warm-up artifacts, off-camera, etc).
