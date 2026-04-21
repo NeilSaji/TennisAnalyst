@@ -165,7 +165,9 @@ describe('smoothFrames', () => {
 
   it('smoothed output moves toward new data each step (one euro)', () => {
     // With a low cutoff, smoothed output should sit between the previous
-    // state and the fresh measurement.
+    // state and the fresh measurement. This test specifically asserts the
+    // single-pass causal response — zero-phase (filtfilt) deliberately
+    // reshapes the 2-frame edge case so we opt out here.
     const frame0 = makeFrame(0, [
       { x: 0.2, y: 0.2, visibility: 1 },
       { x: 0.8, y: 0.8, visibility: 1 },
@@ -180,6 +182,7 @@ describe('smoothFrames', () => {
       minCutoff: 1.0,
       beta: 0.007,
       dcutoff: 1.0,
+      zeroPhase: false,
     })
     expect(result.length).toBe(2)
 

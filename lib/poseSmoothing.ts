@@ -277,6 +277,31 @@ export interface SmoothOptions {
   warmupDiscard?: number
   /** Number of initial frames to average for filter seed. Default 3. */
   lookaheadWindow?: number
+  /**
+   * Zero-phase filtering: apply the One Euro filter forward, then on the
+   * time-reversed sequence, then re-reverse. Cancels the ~50-80ms phase
+   * lag that a causal IIR produces on fast motion, which was baking a
+   * visible "skeleton lags the body" offset into cached keypoints.
+   * Default true. Set false to keep single-pass causal behavior (used by
+   * tests that assert the step-by-step causal response shape).
+   */
+  zeroPhase?: boolean
+}
+
+// Reverse a frame sequence in time so oneEuroSmooth can run it as the
+// backward half of a filtfilt pair. Order is flipped and each timestamp
+// is remapped to `lastTs - timestamp_ms` so deltas stay positive (the
+// filter would otherwise fall back to FALLBACK_DT every step).
+// Applying this function twice restores the original order and timestamps.
+function reverseFramesForFiltfilt(frames: PoseFrame[]): PoseFrame[] {
+  if (frames.length === 0) return []
+  const lastTs = frames[frames.length - 1].timestamp_ms
+  const out: PoseFrame[] = new Array(frames.length)
+  for (let i = frames.length - 1, j = 0; i >= 0; i--, j++) {
+    const f = frames[i]
+    out[j] = { ...f, timestamp_ms: lastTs - f.timestamp_ms }
+  }
+  return out
 }
 
 /**
@@ -303,6 +328,7 @@ export function smoothFrames(
     minBboxArea = DEFAULT_MIN_BBOX_AREA,
     warmupDiscard = DEFAULT_WARMUP_DISCARD,
     lookaheadWindow = DEFAULT_LOOKAHEAD_WINDOW,
+    zeroPhase = true,
   } = opts
 
   if (frames.length === 0) return []
@@ -318,5 +344,16 @@ export function smoothFrames(
 
   if (filtered.length === 0) return []
 
-  return oneEuroSmooth(filtered, { minCutoff, beta, dcutoff }, lookaheadWindow)
+  const params = { minCutoff, beta, dcutoff }
+  const forward = oneEuroSmooth(filtered, params, lookaheadWindow)
+  if (!zeroPhase) return forward
+
+  // Forward pass lags by +τ. Running the same causal filter over the
+  // time-reversed sequence applies a +τ shift in the reversed timeline,
+  // which is -τ in the original timeline. Combined: zero net phase.
+  // Edge transients from both passes are ≤ lookaheadWindow frames, which
+  // matches the existing warmup discard behavior at the start of a clip.
+  const reversed = reverseFramesForFiltfilt(forward)
+  const reverseSmoothed = oneEuroSmooth(reversed, params, lookaheadWindow)
+  return reverseFramesForFiltfilt(reverseSmoothed)
 }

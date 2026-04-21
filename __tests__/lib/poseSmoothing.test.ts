@@ -242,6 +242,47 @@ describe('smoothFrames', () => {
     expect(peakVal).toBeGreaterThan(0.7 * 0.7)
   })
 
+  it('zero-phase mode shifts the peak less than causal mode', () => {
+    // A causal filter phase-shifts peaks forward in time (baked-in lag).
+    // filtfilt should cancel that, so the peak of the same triangle wave
+    // lands closer to the true index.
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 30; i++) {
+      const x = 0.3 + 0.4 * (1 - Math.abs(i - 15) / 15)
+      frames.push(
+        makeFrame(i, i * 33, [
+          makeLandmark(LANDMARK_INDICES.NOSE, x, 0.5, 1.0),
+          makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.4, 0.6, 1.0),
+          makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.6, 0.6, 1.0),
+        ]),
+      )
+    }
+
+    const argmaxNose = (out: PoseFrame[]) => {
+      let peakIdx = 0
+      let peakVal = -Infinity
+      for (let i = 0; i < out.length; i++) {
+        const x = out[i].landmarks.find(
+          (l) => l.id === LANDMARK_INDICES.NOSE,
+        )!.x
+        if (x > peakVal) {
+          peakVal = x
+          peakIdx = i
+        }
+      }
+      return peakIdx
+    }
+
+    const causal = smoothFrames(frames, { warmupDiscard: 0, zeroPhase: false })
+    const zeroPhase = smoothFrames(frames, { warmupDiscard: 0 })
+
+    const causalShift = Math.abs(argmaxNose(causal) - 15)
+    const zeroPhaseShift = Math.abs(argmaxNose(zeroPhase) - 15)
+
+    expect(zeroPhaseShift).toBeLessThanOrEqual(causalShift)
+    expect(zeroPhaseShift).toBeLessThanOrEqual(1)
+  })
+
   it('recomputes joint angles from smoothed landmarks', () => {
     const frames = Array.from({ length: 5 }, (_, i) =>
       makeFrame(i, i * 33, makeStandingPose(), {
