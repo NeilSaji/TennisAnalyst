@@ -23,6 +23,12 @@ const JOINT_GROUP_COLORS: Record<JointGroup, string> = {
   ankles: '#ec4899',     // pink
 }
 
+// Hard confidence cutoff: below this, the landmark (and any bone touching it)
+// is dropped from the render entirely. A faded/ghost joint reads to the user
+// as "the tracker thinks the knee is here" even at 20% opacity — we'd rather
+// show nothing and let them see what the pipeline is actually confident about.
+const VISIBILITY_CUTOFF = 0.6
+
 export function renderPose(
   ctx: CanvasRenderingContext2D,
   frame: PoseFrame,
@@ -32,18 +38,14 @@ export function renderPose(
 ): void {
   const { visible, showSkeleton, color, skeletonColor, scale = 1 } = options
 
-  // Build a map of landmark id -> pixel coords + visibility (for opacity).
-  // Skip entirely below 0.3; above, caller fades by (vis - 0.3) / 0.7.
-  const pixelMap = new Map<
-    number,
-    { x: number; y: number; visibility: number }
-  >()
+  // Build a map of landmark id -> pixel coords. Low-confidence landmarks
+  // are dropped entirely so bones with an uncertain endpoint also drop out.
+  const pixelMap = new Map<number, { x: number; y: number }>()
   for (const lm of frame.landmarks) {
-    if (lm.visibility < 0.3) continue
+    if (lm.visibility < VISIBILITY_CUTOFF) continue
     pixelMap.set(lm.id, {
       x: lm.x * canvasWidth,
       y: lm.y * canvasHeight,
-      visibility: lm.visibility,
     })
   }
 
@@ -87,13 +89,10 @@ export function renderPose(
     const dotColor = color ?? JOINT_GROUP_COLORS[group]
     ctx.save()
 
+    ctx.globalAlpha = 0.9 * scale
     for (const id of ids) {
       const pos = pixelMap.get(id)
       if (!pos) continue
-
-      // Fade joints smoothly through 0.3 -> 1.0 visibility rather than popping.
-      const vAlpha = Math.max(0, Math.min(1, (pos.visibility - 0.3) / 0.7))
-      ctx.globalAlpha = 0.9 * scale * vAlpha
 
       // Outer ring
       ctx.beginPath()
@@ -172,15 +171,13 @@ export function renderPoseZoomed(
     y: ((y - bounds.minY) / bh) * canvasHeight,
   })
 
-  // Build pixel map keyed by id, with visibility preserved for opacity fade.
-  const pixelMap = new Map<
-    number,
-    { x: number; y: number; visibility: number }
-  >()
+  // Hard cutoff matches renderPose: uncertain landmarks drop out rather
+  // than ghost in at low opacity.
+  const pixelMap = new Map<number, { x: number; y: number }>()
   for (const lm of frame.landmarks) {
-    if (lm.visibility < 0.3) continue
+    if (lm.visibility < VISIBILITY_CUTOFF) continue
     const p = toPixel(lm.x, lm.y)
-    pixelMap.set(lm.id, { x: p.x, y: p.y, visibility: lm.visibility })
+    pixelMap.set(lm.id, { x: p.x, y: p.y })
   }
 
   // Draw skeleton bones with halo outline.
@@ -220,12 +217,10 @@ export function renderPoseZoomed(
     const dotColor = color ?? JOINT_GROUP_COLORS[group]
     ctx.save()
 
+    ctx.globalAlpha = 0.9 * scale
     for (const id of ids) {
       const pos = pixelMap.get(id)
       if (!pos) continue
-
-      const vAlpha = Math.max(0, Math.min(1, (pos.visibility - 0.3) / 0.7))
-      ctx.globalAlpha = 0.9 * scale * vAlpha
 
       // Outer ring
       ctx.beginPath()

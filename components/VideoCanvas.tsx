@@ -1,88 +1,17 @@
 'use client'
 
 import { useRef, useEffect, useCallback, useState } from 'react'
-import type { PoseFrame, Landmark, JointAngles, RacketHead } from '@/lib/supabase'
+import type { PoseFrame } from '@/lib/supabase'
 import type { JointGroup } from '@/lib/jointAngles'
 import { renderPose, normalizeLandmarks } from './PoseRenderer'
 import { SwingPathTracer } from './SwingPathTracer'
 
-// Linear interpolation between two pose frames. Keypoints are sampled at
-// ~30fps on Railway but the video often plays at 60fps+ native, so
-// nearest-neighbor lookup surfaces as a visible 1-frame lag through fast
-// motion. Blending x/y/z/visibility/angles/racket between the two bracketing
-// samples closes that gap without re-extracting server-side.
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t
-}
-
-function lerpLandmark(a: Landmark, b: Landmark, t: number): Landmark {
-  return {
-    id: a.id,
-    name: a.name,
-    x: lerp(a.x, b.x, t),
-    y: lerp(a.y, b.y, t),
-    z: lerp(a.z, b.z, t),
-    visibility: lerp(a.visibility, b.visibility, t),
-  }
-}
-
-function lerpJointAngles(a: JointAngles, b: JointAngles, t: number): JointAngles {
-  const out: JointAngles = {}
-  const keys = new Set<keyof JointAngles>([
-    ...(Object.keys(a) as (keyof JointAngles)[]),
-    ...(Object.keys(b) as (keyof JointAngles)[]),
-  ])
-  for (const k of keys) {
-    const av = a[k]
-    const bv = b[k]
-    if (av !== undefined && bv !== undefined) {
-      out[k] = lerp(av, bv, t)
-    } else if (av !== undefined) {
-      out[k] = av
-    } else if (bv !== undefined) {
-      out[k] = bv
-    }
-  }
-  return out
-}
-
-// Preserves a detection on either side to keep the racket trail continuous
-// across a dropped frame. Returning null mid-stream would cause the trail
-// to flicker.
-function lerpRacketHead(
-  a: RacketHead | undefined,
-  b: RacketHead | undefined,
-  t: number,
-): RacketHead | undefined {
-  if (a === undefined && b === undefined) return undefined
-  if (a === null && b === null) return null
-  if (a === undefined || a === null) return b ?? null
-  if (b === undefined || b === null) return a
-  return {
-    x: lerp(a.x, b.x, t),
-    y: lerp(a.y, b.y, t),
-    confidence: lerp(a.confidence, b.confidence, t),
-  }
-}
-
-// Keeps `next.frame_index` so the swing tracer's "advance only when crossing
-// into a new sampled frame" dedupe at VideoCanvas.tsx ~line 139 still works.
-export function interpolateFrame(a: PoseFrame, b: PoseFrame, alpha: number): PoseFrame {
-  const t = alpha <= 0 ? 0 : alpha >= 1 ? 1 : alpha
-  const n = Math.min(a.landmarks.length, b.landmarks.length)
-  const landmarks = new Array<Landmark>(n)
-  for (let i = 0; i < n; i++) {
-    landmarks[i] = lerpLandmark(a.landmarks[i], b.landmarks[i], t)
-  }
-  return {
-    frame_index: b.frame_index,
-    timestamp_ms: Math.round(lerp(a.timestamp_ms, b.timestamp_ms, t)),
-    landmarks,
-    joint_angles: lerpJointAngles(a.joint_angles, b.joint_angles, t),
-    racket_head: lerpRacketHead(a.racket_head, b.racket_head, t),
-  }
-}
-
+// Nearest-neighbor lookup: return the sampled pose frame whose timestamp
+// is closest to the requested time. We deliberately do NOT interpolate
+// between bracketing frames — interpolation synthesizes a position the
+// detector never actually saw, which reads to the user as the overlay
+// "predicting" joints between samples. With zero-phase (filtfilt) smoothing
+// upstream, nearest-neighbor at 30fps sample rate stays visibly locked.
 export function getFrameAtTime(frames: PoseFrame[], timeSec: number): PoseFrame | null {
   if (!frames.length) return null
   const timeMs = timeSec * 1000
@@ -93,10 +22,9 @@ export function getFrameAtTime(frames: PoseFrame[], timeSec: number): PoseFrame 
     const cur = frames[i]
     if (cur.timestamp_ms >= timeMs) {
       const prev = frames[i - 1]
-      const span = cur.timestamp_ms - prev.timestamp_ms
-      if (span <= 0) return cur
-      const alpha = (timeMs - prev.timestamp_ms) / span
-      return interpolateFrame(prev, cur, alpha)
+      const dPrev = timeMs - prev.timestamp_ms
+      const dCur = cur.timestamp_ms - timeMs
+      return dCur < dPrev ? cur : prev
     }
   }
   return last
