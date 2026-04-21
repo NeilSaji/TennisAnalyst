@@ -21,7 +21,13 @@ async function doInit(): Promise<PoseLandmarkerInstance> {
         'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task',
       delegate: 'GPU',
     },
-    runningMode: 'VIDEO',
+    // IMAGE mode instead of VIDEO so each frame is detected fresh. VIDEO mode's
+    // ROI tracker latches onto bad detections on small-in-frame subjects (wide
+    // court shots where the player is ~15% of the frame) and keeps outputting
+    // drifted/stale positions. IMAGE mode pays a speed cost during extraction
+    // but produces temporally-independent detections that filtfilt smoothing
+    // can actually clean up.
+    runningMode: 'IMAGE',
     numPoses: 1,
     minPoseDetectionConfidence: 0.5,
     minPosePresenceConfidence: 0.5,
