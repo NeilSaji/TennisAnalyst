@@ -21,7 +21,7 @@ function isExemptPath(pathname: string): boolean {
 // Paths that require an authenticated session. Anonymous visitors to these
 // routes get bounced to /login with a `next` param. Everything else
 // (landing page, /login itself, static assets) passes through.
-const REQUIRES_AUTH_PREFIXES = ['/analyze', '/baseline', '/profile']
+const REQUIRES_AUTH_PREFIXES = ['/analyze', '/baseline', '/live', '/profile']
 
 function requiresAuth(pathname: string): boolean {
   return REQUIRES_AUTH_PREFIXES.some(

@@ -16,6 +16,7 @@ export default function Nav() {
         </Link>
 
         <div className="flex items-center gap-1">
+          <NavLink href="/live">Live</NavLink>
           <NavLink href="/analyze">Analyze</NavLink>
           <NavLink href="/baseline">Baselines</NavLink>
 
