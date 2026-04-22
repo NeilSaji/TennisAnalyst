@@ -83,11 +83,23 @@ def angle_between(a, b, c):
     return math.degrees(math.acos(cos_angle))
 
 
-def compute_joint_angles_from_dicts(landmarks: list[dict]) -> dict:
-    """Compute key joint angles from a list of landmark dicts with x, y keys."""
+def compute_joint_angles_from_dicts(
+    landmarks: list[dict], min_visibility: float = 0.0
+) -> dict:
+    """Compute key joint angles from a list of landmark dicts with x, y keys.
+
+    `min_visibility` gates each landmark before it's used. Default 0
+    preserves the original v2 (MediaPipe) behavior where every landmark
+    contributes regardless of confidence. The v3 (RTMPose) path passes a
+    low positive value so the visibility=0 placeholder landmarks (face
+    detail, hands, heels, foot_index) don't produce meaningless angles
+    like `right_wrist: 0.0` derived from (0,0)-(0,0)-(0,0) triplets.
+    """
     def get(idx):
         if idx < len(landmarks):
             lm = landmarks[idx]
+            if lm.get("visibility", 1.0) < min_visibility:
+                return None
             return (lm["x"], lm["y"])
         return None
 
@@ -133,22 +145,29 @@ def compute_joint_angles_from_dicts(landmarks: list[dict]) -> dict:
     return angles
 
 
-def extract_keypoints_from_video(video_path: str, sample_fps: int = 30, max_seconds: float = 0) -> dict:
-    """Extract pose keypoints from a video file using MediaPipe Tasks API.
+def _try_load_racket_detector():
+    """Best-effort import of the racket detector.
 
-    Args:
-        max_seconds: Stop after this many seconds. 0 = process entire video.
+    Returns either the callable or None when ultralytics/onnxruntime
+    isn't fully wired (e.g. unit-test environments without GPU/CPU
+    weights). Logged but never raised so extraction still runs.
     """
-    if POSE_BACKEND == "rtmpose":
-        raise NotImplementedError("rtmpose backend not yet implemented")
-    if POSE_BACKEND != "mediapipe":
-        raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND}")
-
     try:
         from racket_detector import detect_racket  # type: ignore
+
+        return detect_racket
     except Exception as e:  # noqa: BLE001
         print(f"[extract] racket_detector unavailable: {e}")
-        detect_racket = None  # type: ignore
+        return None
+
+
+def _extract_with_mediapipe(
+    video_path: str, sample_fps: int, max_seconds: float
+) -> dict:
+    """Pose extraction via MediaPipe Heavy. Original implementation, unchanged
+    in behavior -- factored into its own function so the rtmpose path can sit
+    next to it without a giant if/else nested branch."""
+    detect_racket = _try_load_racket_detector()
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -204,28 +223,9 @@ def extract_keypoints_from_video(video_path: str, sample_fps: int = 30, max_seco
                     ]
                     joint_angles = compute_joint_angles_from_dicts(landmarks)
 
-                    racket_head = None
-                    if detect_racket is not None:
-                        h, w = frame.shape[:2]
-                        lw = landmarks[15] if len(landmarks) > 15 else None
-                        rw = landmarks[16] if len(landmarks) > 16 else None
-                        dominant = None
-                        if lw and rw:
-                            dominant = rw if rw["visibility"] >= lw["visibility"] else lw
-                        elif lw:
-                            dominant = lw
-                        elif rw:
-                            dominant = rw
-                        wrist_xy = (
-                            (dominant["x"] * w, dominant["y"] * h)
-                            if dominant is not None
-                            else None
-                        )
-                        try:
-                            racket_head = detect_racket(frame, wrist_xy)
-                        except Exception as e:  # noqa: BLE001
-                            print(f"[extract] racket detect failed on frame {processed_index}: {e}")
-                            racket_head = None
+                    racket_head = _detect_racket_for_frame(
+                        detect_racket, frame, landmarks, processed_index
+                    )
 
                     frames.append({
                         "frame_index": processed_index,
@@ -251,6 +251,133 @@ def extract_keypoints_from_video(video_path: str, sample_fps: int = 30, max_seco
         "duration_ms": round(total_duration_ms),
         "schema_version": 2,
     }
+
+
+def _detect_racket_for_frame(detect_racket, frame_bgr, landmarks: list[dict], processed_index: int):
+    """Shared racket-head detection. Picks the higher-visibility wrist as the
+    dominant hand and feeds the racket detector. Returns None on any failure
+    (logged but never raised)."""
+    if detect_racket is None:
+        return None
+    h, w = frame_bgr.shape[:2]
+    lw = landmarks[15] if len(landmarks) > 15 else None
+    rw = landmarks[16] if len(landmarks) > 16 else None
+    dominant = None
+    if lw and rw:
+        dominant = rw if rw["visibility"] >= lw["visibility"] else lw
+    elif lw:
+        dominant = lw
+    elif rw:
+        dominant = rw
+    wrist_xy = (
+        (dominant["x"] * w, dominant["y"] * h)
+        if dominant is not None
+        else None
+    )
+    try:
+        return detect_racket(frame_bgr, wrist_xy)
+    except Exception as e:  # noqa: BLE001
+        print(f"[extract] racket detect failed on frame {processed_index}: {e}")
+        return None
+
+
+def _extract_with_rtmpose(
+    video_path: str, sample_fps: int, max_seconds: float
+) -> dict:
+    """Pose extraction via YOLO11n person crop + RTMPose-m.
+
+    Schema_version=3: COCO-17 keypoints remapped to BlazePose-33 ids, with
+    the unmapped ids (face details, hands, heels, foot_index) at
+    visibility=0. wrist-flexion joint angles are dropped because the
+    index-finger landmarks (BlazePose 19/20) aren't filled.
+    """
+    from pose_rtmpose import infer_pose_for_frame  # local import: heavy onnx setup
+
+    detect_racket = _try_load_racket_detector()
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    frame_interval = max(1, int(video_fps / sample_fps))
+    max_frame = int(max_seconds * video_fps) if max_seconds > 0 else 0
+    frames: list[dict] = []
+    frame_index = 0
+    processed_index = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if max_frame > 0 and frame_index >= max_frame:
+            break
+
+        if frame_index % frame_interval == 0:
+            timestamp_ms = int((frame_index / video_fps) * 1000)
+            try:
+                landmarks = infer_pose_for_frame(frame)
+            except Exception as e:  # noqa: BLE001
+                # Skip the frame on detector failure rather than aborting the
+                # whole clip -- one bad frame shouldn't lose the whole swing.
+                print(f"[extract:rtmpose] inference failed on frame {frame_index}: {e}")
+                landmarks = None
+
+            if landmarks is not None:
+                # min_visibility=0.1 skips the v=0 placeholder ids that
+                # exist in v3 only because COCO-17 doesn't fill them.
+                # Without this, joint_angles ends up with `right_wrist:
+                # 0.0` (computed off zeroed index_finger landmarks),
+                # which the analyzer would surface as a real value.
+                joint_angles = compute_joint_angles_from_dicts(
+                    landmarks, min_visibility=0.1
+                )
+                racket_head = _detect_racket_for_frame(
+                    detect_racket, frame, landmarks, processed_index
+                )
+                frames.append({
+                    "frame_index": processed_index,
+                    "timestamp_ms": round(timestamp_ms, 1),
+                    "landmarks": landmarks,
+                    "joint_angles": joint_angles,
+                    "racket_head": racket_head,
+                })
+                processed_index += 1
+
+        frame_index += 1
+
+    cap.release()
+
+    total_frames = frame_index
+    total_duration_ms = (total_frames / video_fps) * 1000
+
+    return {
+        "fps_sampled": sample_fps,
+        "frame_count": len(frames),
+        "frames": frames,
+        "video_fps": video_fps,
+        "duration_ms": round(total_duration_ms),
+        # v3: COCO-17 backbone via RTMPose. Wrist-flexion absent.
+        "schema_version": 3,
+    }
+
+
+def extract_keypoints_from_video(video_path: str, sample_fps: int = 30, max_seconds: float = 0) -> dict:
+    """Extract pose keypoints from a video file.
+
+    Backend selection via POSE_BACKEND env var:
+      * "mediapipe" (default) -- BlazePose Heavy via MediaPipe Tasks. Schema v2.
+      * "rtmpose" -- YOLO11n person crop + RTMPose-m. Schema v3 (no wrist
+        flexion).
+
+    Args:
+        max_seconds: Stop after this many seconds. 0 = process entire video.
+    """
+    if POSE_BACKEND == "rtmpose":
+        return _extract_with_rtmpose(video_path, sample_fps, max_seconds)
+    if POSE_BACKEND == "mediapipe":
+        return _extract_with_mediapipe(video_path, sample_fps, max_seconds)
+    raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND}")
 
 
 class ExtractRequest(BaseModel):

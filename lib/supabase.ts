@@ -108,8 +108,17 @@ export type KeypointsJson = {
   fps_sampled: number
   frame_count: number
   frames: PoseFrame[]
-  // 1 = legacy (no racket_head, no wrist angles). 2 = current. Treat undefined as 1.
-  schema_version?: 1 | 2
+  // Schema versions:
+  //   undefined / 1 = legacy MediaPipe (no racket_head, no wrist angles).
+  //   2             = MediaPipe Heavy with racket_head + wrist-flexion angle.
+  //   3             = RTMPose-m via Railway. COCO-17 backbone remapped to
+  //                   BlazePose-33 ids: face / hands / heels / foot_index
+  //                   carry visibility=0; wrist-flexion joint angles
+  //                   (right_wrist / left_wrist) are absent because the
+  //                   index-finger landmarks aren't filled. Renderer and
+  //                   joint-angle code handle this implicitly because they
+  //                   gate on visibility>=cutoff and on landmark presence.
+  schema_version?: 1 | 2 | 3
 }
 
 export type PhaseLabels = {
