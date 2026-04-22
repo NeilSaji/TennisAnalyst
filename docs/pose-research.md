@@ -132,13 +132,14 @@ by keeping the existing browser path live as a fallback when
 `RAILWAY_SERVICE_URL` is unset — extract path is chosen at runtime in the
 hook, not gated at build time.
 
-**Update during implementation.** Per user direction during build, the
-delivered scope is the Railway-side model swap only. We don't rewire
-`/api/sessions` or `usePoseExtractor` in this pass — keeping the client
-flow on browser MediaPipe means zero change to the upload UX, while pro
-clips and any caller that hits `/extract` immediately gets RTMPose+YOLO.
-The seam to flip user uploads to server-side later is a single env var
-plus the hook change described above; nothing in this PR forecloses it.
+**Scope this PR.** Both paths flip to RTMPose. Server side first (the
+`POSE_BACKEND=rtmpose` branch in `extract_keypoints_from_video` plus
+the matching path in `extract_clip_keypoints.py`), then a new
+`/api/extract` route delegates user uploads to Railway and the
+`UploadZone` flow polls the resulting session for completion instead of
+running MediaPipe in the browser. The browser MediaPipe path stays in
+the codebase as a `RAILWAY_SERVICE_URL`-unset fallback for local dev
+without a Railway URL.
 
 ## 4. Methods evaluated
 
@@ -297,12 +298,17 @@ ecosystem fit with our existing Railway image.
    version. Pull the body-7 RTMPose-m ONNX bundle on first import,
    cache to `railway-service/models/rtmpose-m.onnx`.
 2. **Write `railway-service/pose_rtmpose.py`** containing:
-   - YOLO11n person crop (reuse the letterbox helper from
-     `racket_detector.py`, factored out)
-   - RTMPose-m ONNX session, 256×192 input
-   - SimCC decode → (x, y, conf) per keypoint
-   - Inverse transform back to full-frame normalized
-   - COCO-17 → BlazePose-33 id mapping
+   - YOLO11n person detector (reuse pieces from `racket_detector.py`).
+     Run on the full frame, take the highest-confidence person bbox in
+     xyxy pixel coords.
+   - `rtmlib.RTMPose(...)` instance held module-level. `__call__(image,
+     bboxes=[bbox])` returns keypoints already in original-image pixel
+     coords (rtmlib owns the letterbox + SimCC decode + inverse
+     transform — no hand-rolled geometry on our side, which is the
+     thing the prior crop attempt got wrong).
+   - COCO-17 → BlazePose-33 id mapping (static dict).
+   - Score → `visibility` translation (rtmlib already returns per-keypoint
+     softmax peak).
 3. **Wire the `POSE_BACKEND=rtmpose` branch in
    `extract_keypoints_from_video` and `extract_clip_keypoints.py`** to
    call the new module. Default `POSE_BACKEND` stays `mediapipe` so the
@@ -311,14 +317,14 @@ ecosystem fit with our existing Railway image.
    angle is omitted (left/right_wrist undefined), heels/foot-index left
    at visibility 0.
 5. **Tests** (`railway-service/tests/test_pose_rtmpose.py`):
-   - Letterbox round-trip preserves landmark coordinates within 1 px on
-     synthetic frames.
    - COCO-17 → BlazePose-33 mapping fills the right ids and zeros the
-     right ids.
-   - SimCC decode on a known synthetic distribution returns the argmax
-     bin.
-   - Mock onnxruntime sessions; no GPU / no real model file required for
-     CI.
+     right ids on a known input.
+   - Person-bbox selection from a multi-detection YOLO output picks the
+     highest-confidence person (class 0).
+   - With rtmlib stubbed (no real ONNX session), the wrapper builds a
+     valid PoseFrame for a synthetic frame.
+   - Mock both onnxruntime sessions; no GPU / no real model file
+     required for CI.
 6. **Wholeextraction integration test** (`tests/test_extract_rtmpose.py`):
    feed a real ~30-frame video clip from `pro-videos/clips`, assert the
    output has the right shape, monotonic timestamps, and at least one
@@ -332,13 +338,19 @@ ecosystem fit with our existing Railway image.
 ## 7. Validation plan
 
 There's no labeled tennis test set to compute COCO-AP against, so the
-acceptance criteria are observable / measurable on existing pro clips:
+acceptance criteria are observable / measurable on existing pro clips
+in `public/pro-videos/`:
 
-- **Landmark drop rate per failure mode.** For each of three pro clips
-  hand-picked to exhibit each failure mode (small-in-frame, fast joint,
-  back-facing), count the frames where bone-length-plausibility filter
-  zeros the elbow or wrist. Lower is better — we expect order-of-
-  magnitude improvement on small-in-frame.
+| Failure mode | Clip |
+|---|---|
+| Small-in-frame, back-facing | `carlos_alcaraz_forehand_behind_1776374463938.mp4` |
+| Fast joint (forehand contact) | `jannik_sinner_forehand_side_1776381824347.mp4` |
+| Back-facing oblique | `novak_djokovic_backhand_side_1776383254038.mp4` |
+
+- **Landmark drop rate per failure mode.** For each of the three clips
+  above, count the frames where bone-length-plausibility filter zeros
+  the elbow or wrist. Lower is better — we expect order-of-magnitude
+  improvement on small-in-frame.
 - **Bone-length variance over the clip.** Compute std-dev of
   shoulder→elbow and elbow→wrist length divided by the median, per side.
   Lower = the tracker is internally consistent. We expect a meaningful
