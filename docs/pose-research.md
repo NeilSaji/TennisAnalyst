@@ -377,3 +377,33 @@ in `public/pro-videos/`:
 - [Pose2Sim (perfanalytics/pose2sim)](https://github.com/perfanalytics/pose2sim) — sports biomechanics framework that switched default backend from OpenPose / MediaPipe to RTMPose
 - [COCO-WholeBody data format](https://github.com/jin-s13/COCO-WholeBody/blob/master/data_format.md)
 - [Best Pose Estimation Models (Roboflow blog)](https://blog.roboflow.com/best-pose-estimation-models/)
+
+## 9. Results
+
+Ran `railway-service/tests/validate_rtmpose_vs_mediapipe.py` on the three
+named clips from §7. Both backends were driven end-to-end via
+`extract_clip_keypoints.py` as a subprocess with `POSE_BACKEND` set per
+invocation, so the pipeline exercised is the same one that runs on
+Railway. Drop rate counts frames where either the left/right elbow or
+wrist falls below the render-time visibility cutoff (0.6). Bone
+stability is mean of std/median across
+`{shoulder->elbow, elbow->wrist} × {left, right}` for frames where both
+endpoints are visible (lower = more stable).
+
+| Clip | mp stab | rt stab | mp drop | rt drop |
+|---|---|---|---|---|
+| carlos_alcaraz_forehand_behind (small-in-frame) | 0.3174 | **0.2829** | 90.5% | **27.0%** |
+| jannik_sinner_forehand_side (fast joint) | 0.2955 | **0.2459** | 52.8% | **35.8%** |
+| novak_djokovic_backhand_side (back-facing) | **0.1926** | 0.2047 | 48.2% | **18.7%** |
+
+RTMPose wins on bone stability on 2/3 clips and on drop rate on 3/3
+clips. The single bone-stability regression on the Djokovic clip is
+explained by the drop-rate gap -- RTMPose is keeping **29.5
+percentage-points more frames visible** on that clip, so its stability
+sample includes harder frames that MediaPipe silently dropped (survivor
+bias). The headline win is the Alcaraz small-in-frame clip, which was
+the primary failure mode motivating the swap: MediaPipe dropped 90.5%
+of frames to the visibility filter, RTMPose only 27%. Latency on a
+2020-vintage MacBook Pro CPU:
+~5-9s per clip (both backends), well under the 5-min budget.
+
