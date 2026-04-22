@@ -1,12 +1,14 @@
-"""Racket-head detection via YOLOv11n (COCO class 38 = "tennis racket").
+"""Racket tracking via YOLOv11n (COCO class 38 = "tennis racket").
 
 On import we lazily download `yolo11n.pt` to railway-service/models/ and export
 to ONNX. Inference at runtime goes through onnxruntime so we don't pay for a
 hot PyTorch runtime.
 
-The racket-head point is the bbox corner farthest from the dominant wrist — a
-cheap heuristic that tracks the swing tip well enough for the tracer without
-needing a keypoint-level racket model.
+We output the bbox CENTER of the detected racket — a stand-in for the sweet
+spot / middle of the strung area. Earlier we tracked the far corner (tip),
+but the middle of the racket is what actually makes contact with the ball
+and is the biomechanically-interesting point to trace a swing path from.
+The field name on PoseFrame is still `racket_head` for schema continuity.
 """
 from __future__ import annotations
 
@@ -134,12 +136,13 @@ def detect_racket(
     frame_bgr: np.ndarray,
     dominant_wrist_xy: Optional[Tuple[float, float]] = None,
 ) -> Optional[RacketHead]:
-    """Run YOLOv11n on *frame_bgr* and return the racket-head point as
+    """Run YOLOv11n on *frame_bgr* and return the racket center point as
     normalized (x, y) plus confidence, or None if no confident detection.
 
-    `dominant_wrist_xy` is in pixel space (same coord system as frame_bgr).
-    The head point is the bbox corner farthest from the wrist; if no wrist is
-    given we fall back to the bbox center.
+    `dominant_wrist_xy` is unused in this revision but kept in the signature
+    for back-compat with the existing extractor. We output the bbox center
+    (sweet-spot proxy) rather than a wrist-relative corner — the center is
+    the point a stroke analyst actually wants to trace through contact.
     """
     try:
         _ensure_model()
@@ -165,20 +168,15 @@ def detect_racket(
 
     x1, y1, x2, y2, conf = box
 
-    if dominant_wrist_xy is not None:
-        wx, wy = dominant_wrist_xy
-        corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
-        head_x, head_y = max(
-            corners,
-            key=lambda p: (p[0] - wx) ** 2 + (p[1] - wy) ** 2,
-        )
-    else:
-        head_x = (x1 + x2) / 2
-        head_y = (y1 + y2) / 2
+    # Always use the bbox center. This is the sweet-spot proxy the swing
+    # tracer follows. `dominant_wrist_xy` is intentionally unused.
+    _ = dominant_wrist_xy
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
 
     # Normalize to [0,1], matching Landmark.x/y space.
     return {
-        "x": max(0.0, min(1.0, head_x / w)),
-        "y": max(0.0, min(1.0, head_y / h)),
+        "x": max(0.0, min(1.0, center_x / w)),
+        "y": max(0.0, min(1.0, center_y / h)),
         "confidence": round(conf, 3),
     }

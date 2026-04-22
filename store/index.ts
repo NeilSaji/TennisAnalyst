@@ -106,10 +106,11 @@ export const useJointStore = create<JointStore>((set) => ({
   visible: { ...defaultVisible },
   showSkeleton: true,
   showTrail: true,
-  // Off by default. User requested racket-head overlay be removed; the
-  // store field and toggle are retained only because tests reference
-  // them. No UI surfaces a way to turn it back on.
-  showRacket: false,
+  // On by default. The tracer now follows the bbox center of the detected
+  // racket (sweet-spot proxy) — user explicitly wants this as the primary
+  // swing-path signal, so it renders out of the box and is still toggleable
+  // from JointTogglePanel.
+  showRacket: true,
   toggleJoint: (group) =>
     set((state) => ({
       visible: { ...state.visible, [group]: !state.visible[group] },

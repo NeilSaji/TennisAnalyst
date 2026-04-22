@@ -58,15 +58,17 @@ describe('JointTogglePanel', () => {
     expect(screen.getByText('Ankles')).toBeInTheDocument()
   })
 
-  it('renders skeleton toggle and trail toggle', () => {
+  it('renders skeleton, trail, and racket toggles', () => {
     render(<JointTogglePanel />)
     expect(screen.getByText('Skeleton Lines')).toBeInTheDocument()
     expect(screen.getByText('Swing Path Trail')).toBeInTheDocument()
+    expect(screen.getByText(/Racket Path/i)).toBeInTheDocument()
   })
 
-  it('does not render a racket toggle (racket-head overlay removed)', () => {
+  it('clicking the racket toggle calls toggleRacket', () => {
     render(<JointTogglePanel />)
-    expect(screen.queryByText('Racket')).toBeNull()
+    fireEvent.click(screen.getByText(/Racket Path/i))
+    expect(mockToggleRacket).toHaveBeenCalledOnce()
   })
 
   it('clicking a joint group calls toggleJoint with correct group', () => {
