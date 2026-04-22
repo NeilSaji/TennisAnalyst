@@ -349,6 +349,41 @@ class TestInferPoseForFrameStubbed:
         for blaze_id in (11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28):
             assert out_by_id[blaze_id]["visibility"] == pytest.approx(0.85, abs=1e-3)
 
+    def test_yolo_init_failure_is_sticky(self, monkeypatch):
+        """If _ensure_yolo raises once, subsequent calls re-raise without
+        re-attempting the export. Without this, a 30s clip would re-try
+        the export 900 times after the first failure."""
+        call_count = {"n": 0}
+
+        def fake_inner_init(*_args, **_kwargs):
+            # Simulates ultralytics export failure (e.g. missing onnxscript)
+            call_count["n"] += 1
+            raise RuntimeError("boom")
+
+        # Patch the body of _ensure_yolo by stubbing the ultralytics import
+        # path -- simpler than patching the function itself, since the
+        # error-catch logic lives inside _ensure_yolo.
+        import sys
+        from unittest.mock import MagicMock
+
+        fake_ultralytics = MagicMock()
+        fake_ultralytics.YOLO.side_effect = fake_inner_init
+        monkeypatch.setitem(sys.modules, "ultralytics", fake_ultralytics)
+
+        # Force the YOLO ONNX path to a non-existent file so _ensure_yolo
+        # tries the export branch.
+        monkeypatch.setattr(pose_rtmpose, "YOLO_ONNX_PATH", Path("/tmp/does-not-exist.onnx"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            pose_rtmpose._ensure_yolo()
+        with pytest.raises(RuntimeError, match="boom"):
+            pose_rtmpose._ensure_yolo()
+        with pytest.raises(RuntimeError, match="boom"):
+            pose_rtmpose._ensure_yolo()
+        # YOLO export was attempted exactly once; subsequent calls hit the
+        # sticky-error short-circuit.
+        assert call_count["n"] == 1
+
     def test_passes_expanded_bbox_to_rtmpose(self, monkeypatch):
         # Verify that the bbox we hand to rtmlib is the EXPANDED one,
         # not the raw YOLO output -- the prior crop attempt's downfall

@@ -42,6 +42,11 @@ _rtm_session = None  # type: ignore[assignment]
 _yolo_session = None  # type: ignore[assignment]
 _yolo_input_name: Optional[str] = None
 _init_lock = Lock()
+# Persistent init failures so we don't retry an expensive YOLO export per
+# frame after the first failure. Whatever the first error was is re-raised
+# on every subsequent call until _reset_for_tests() clears it.
+_yolo_init_error: Optional[Exception] = None
+_rtm_init_error: Optional[Exception] = None
 
 MODEL_DIR = Path(__file__).parent / "models"
 
@@ -129,33 +134,46 @@ def _ensure_yolo() -> None:
     """Lazy-export YOLO11n to ONNX and cache an onnxruntime session.
 
     Mirrors racket_detector._ensure_model so we don't ship two
-    download/export pipelines for the same weight.
+    download/export pipelines for the same weight. If the first init
+    raises (missing onnxscript, no internet, broken weights file), the
+    error is sticky -- subsequent calls re-raise immediately instead of
+    re-attempting an export that already failed once. Without this, the
+    rtmpose extract loop would re-export YOLO once per frame, which on
+    a 30s @ 30fps clip is 900 useless retry cycles.
     """
-    global _yolo_session, _yolo_input_name
+    global _yolo_session, _yolo_input_name, _yolo_init_error
 
     if _yolo_session is not None:
         return
+    if _yolo_init_error is not None:
+        raise _yolo_init_error
 
     with _init_lock:
         if _yolo_session is not None:
             return
+        if _yolo_init_error is not None:
+            raise _yolo_init_error
 
-        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-        if not YOLO_ONNX_PATH.exists():
-            from ultralytics import YOLO  # heavy import; setup-time only
+            if not YOLO_ONNX_PATH.exists():
+                from ultralytics import YOLO  # heavy import; setup-time only
 
-            model = YOLO(str(YOLO_PT_PATH) if YOLO_PT_PATH.exists() else "yolo11n.pt")
-            exported = model.export(format="onnx", imgsz=YOLO_INPUT_SIZE, opset=12)
-            exported_path = Path(exported)
-            if exported_path != YOLO_ONNX_PATH:
-                exported_path.replace(YOLO_ONNX_PATH)
+                model = YOLO(str(YOLO_PT_PATH) if YOLO_PT_PATH.exists() else "yolo11n.pt")
+                exported = model.export(format="onnx", imgsz=YOLO_INPUT_SIZE, opset=12)
+                exported_path = Path(exported)
+                if exported_path != YOLO_ONNX_PATH:
+                    exported_path.replace(YOLO_ONNX_PATH)
 
-        import onnxruntime as ort
+            import onnxruntime as ort
 
-        sess = ort.InferenceSession(str(YOLO_ONNX_PATH), providers=["CPUExecutionProvider"])
-        _yolo_input_name = sess.get_inputs()[0].name
-        _yolo_session = sess
+            sess = ort.InferenceSession(str(YOLO_ONNX_PATH), providers=["CPUExecutionProvider"])
+            _yolo_input_name = sess.get_inputs()[0].name
+            _yolo_session = sess
+        except Exception as e:
+            _yolo_init_error = e
+            raise
 
 
 def _ensure_rtmpose() -> None:
@@ -164,26 +182,43 @@ def _ensure_rtmpose() -> None:
     rtmlib auto-downloads the ONNX bundle from the openmmlab CDN on
     first use and caches it under ~/.cache/rtmlib (per the lib's
     convention). We don't ship the weights in the repo.
+
+    rtmlib prints `load <path> with onnxruntime backend` to stdout on
+    successful init. We redirect that to stderr so callers that consume
+    stdout (e.g. extract_clip_keypoints.py emits JSON on stdout) don't
+    get a malformed payload prefix.
     """
-    global _rtm_session
+    global _rtm_session, _rtm_init_error
 
     if _rtm_session is not None:
         return
+    if _rtm_init_error is not None:
+        raise _rtm_init_error
 
     with _init_lock:
         if _rtm_session is not None:
             return
+        if _rtm_init_error is not None:
+            raise _rtm_init_error
 
-        from rtmlib import RTMPose  # type: ignore
+        from contextlib import redirect_stdout
+        import sys
 
-        # device='cpu' is correct for Railway (no GPU). backend='onnxruntime'
-        # because we already pin onnxruntime>=1.18.
-        _rtm_session = RTMPose(
-            onnx_model=RTMPOSE_ONNX_URL,
-            model_input_size=RTMPOSE_INPUT_SIZE,
-            backend="onnxruntime",
-            device="cpu",
-        )
+        try:
+            from rtmlib import RTMPose  # type: ignore
+
+            # device='cpu' is correct for Railway (no GPU). backend='onnxruntime'
+            # because we already pin onnxruntime>=1.18.
+            with redirect_stdout(sys.stderr):
+                _rtm_session = RTMPose(
+                    onnx_model=RTMPOSE_ONNX_URL,
+                    model_input_size=RTMPOSE_INPUT_SIZE,
+                    backend="onnxruntime",
+                    device="cpu",
+                )
+        except Exception as e:
+            _rtm_init_error = e
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -423,9 +458,12 @@ def infer_pose_for_frame(frame_bgr: np.ndarray) -> Optional[list[dict]]:
 def _reset_for_tests() -> None:
     """Reset module-level caches. Tests only -- never call from prod paths."""
     global _rtm_session, _yolo_session, _yolo_input_name
+    global _rtm_init_error, _yolo_init_error
     _rtm_session = None
     _yolo_session = None
     _yolo_input_name = None
+    _rtm_init_error = None
+    _yolo_init_error = None
 
 
 # Allow tests / scripts to override the model directory before lazy init runs.
