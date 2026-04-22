@@ -5,10 +5,13 @@ import { usePoseStore } from '@/store'
 import type { JointGroup } from '@/lib/jointAngles'
 import { getRecommendedVisibility, getShotTypeConfig } from '@/lib/shotTypeConfig'
 
+// Wrist joint-dots were retired as visual noise — the racket-path trail is
+// the signal the user cares about on the wrist side. 'wrists' stays in the
+// underlying JointGroup enum so existing types and shot-config references
+// still compile.
 const JOINT_META: { group: JointGroup; label: string; emoji: string; color: string }[] = [
   { group: 'shoulders', label: 'Shoulders', emoji: '🟡', color: 'bg-amber-500' },
   { group: 'elbows', label: 'Elbows', emoji: '🔴', color: 'bg-red-500' },
-  { group: 'wrists', label: 'Wrists / Racket', emoji: '🟢', color: 'bg-emerald-500' },
   { group: 'hips', label: 'Hips', emoji: '🟣', color: 'bg-violet-500' },
   { group: 'knees', label: 'Knees', emoji: '🔵', color: 'bg-blue-500' },
   { group: 'ankles', label: 'Ankles', emoji: '🩷', color: 'bg-pink-500' },

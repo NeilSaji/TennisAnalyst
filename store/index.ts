@@ -96,7 +96,10 @@ interface JointStore {
 const defaultVisible: VisibilityMap = {
   shoulders: true,
   elbows: true,
-  wrists: true,
+  // Wrist joint-dots retired as visual clutter; racket-path trail is the
+  // signal we show on the wrist side now. Kept on the enum for type
+  // compatibility but off by default and not surfaced in the toggle UI.
+  wrists: false,
   hips: true,
   knees: true,
   ankles: true,

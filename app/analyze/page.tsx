@@ -385,27 +385,52 @@ export default function AnalyzePage() {
         <div className="space-y-4">
           <JointTogglePanel />
 
-          {framesData.length > 0 && (
-            <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-              <h3 className="text-sm font-semibold text-white mb-2">Analysis Stats</h3>
-              <div className="space-y-1.5 text-sm">
-                <div className="flex justify-between text-white/60">
-                  <span>Frames analyzed</span>
-                  <span className="text-white font-mono">{framesData.length}</span>
+          {framesData.length > 0 && (() => {
+            const racketFrames = framesData.filter((f) => f.racket_head != null).length
+            const racketDetected = racketFrames > 0
+            return (
+              <div className="rounded-xl bg-white/5 border border-white/10 p-4">
+                <h3 className="text-sm font-semibold text-white mb-2">Analysis Stats</h3>
+                <div className="space-y-1.5 text-sm">
+                  <div className="flex justify-between text-white/60">
+                    <span>Frames analyzed</span>
+                    <span className="text-white font-mono">{framesData.length}</span>
+                  </div>
+                  <div className="flex justify-between text-white/60">
+                    <span>Duration</span>
+                    <span className="text-white font-mono">
+                      {((framesData[framesData.length - 1]?.timestamp_ms ?? 0) / 1000).toFixed(1)}s
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-white/60">
+                    <span>Joint data</span>
+                    <span className="text-emerald-400 font-medium">Ready</span>
+                  </div>
+                  <div className="flex justify-between text-white/60">
+                    <span>Racket detected</span>
+                    <span
+                      className={
+                        racketDetected
+                          ? 'text-emerald-400 font-mono'
+                          : 'text-amber-400 font-mono'
+                      }
+                    >
+                      {racketFrames} / {framesData.length}
+                    </span>
+                  </div>
                 </div>
-                <div className="flex justify-between text-white/60">
-                  <span>Duration</span>
-                  <span className="text-white font-mono">
-                    {((framesData[framesData.length - 1]?.timestamp_ms ?? 0) / 1000).toFixed(1)}s
-                  </span>
-                </div>
-                <div className="flex justify-between text-white/60">
-                  <span>Joint data</span>
-                  <span className="text-emerald-400 font-medium">Ready</span>
-                </div>
+                {!racketDetected && (
+                  <p className="text-[11px] text-amber-300/80 mt-2">
+                    No racket was detected in this clip. The racket-path trail
+                    needs YOLO to find a tennis racket in the frame — if this
+                    keeps happening, the detector may not be loading on the
+                    server. Check Railway logs for &quot;racket_detector produced
+                    zero detections&quot;.
+                  </p>
+                )}
               </div>
-            </div>
-          )}
+            )
+          })()}
         </div>
       </div>
     </div>

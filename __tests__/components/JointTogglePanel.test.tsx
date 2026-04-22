@@ -48,14 +48,16 @@ beforeEach(() => {
 })
 
 describe('JointTogglePanel', () => {
-  it('renders all 6 joint group toggle buttons', () => {
+  it('renders 5 joint group toggle buttons (wrists retired)', () => {
     render(<JointTogglePanel />)
     expect(screen.getByText('Shoulders')).toBeInTheDocument()
     expect(screen.getByText('Elbows')).toBeInTheDocument()
-    expect(screen.getByText('Wrists / Racket')).toBeInTheDocument()
     expect(screen.getByText('Hips')).toBeInTheDocument()
     expect(screen.getByText('Knees')).toBeInTheDocument()
     expect(screen.getByText('Ankles')).toBeInTheDocument()
+    // Wrists were retired as visual clutter; racket-path trail takes over
+    // on the wrist side.
+    expect(screen.queryByText(/Wrists/i)).toBeNull()
   })
 
   it('renders skeleton and racket toggles, but not the swing path trail', () => {
