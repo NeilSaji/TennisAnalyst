@@ -12,6 +12,12 @@ export type RenderOptions = {
   color?: string           // joint dot color
   skeletonColor?: string   // skeleton line color
   scale?: number           // 0–1 alpha multiplier for ghost/overlay mode
+  // Hide the off-hand's elbow and wrist so the overlay focuses on the
+  // racket arm. Used for forehand (always single-arm), one-handed
+  // backhand, and serve. 'right' = keep right_elbow/right_wrist, drop
+  // left_elbow/left_wrist. Null = show both (default). Shoulders stay
+  // visible on both sides since they anchor rotation.
+  dominantHand?: 'left' | 'right' | null
 }
 
 const JOINT_GROUP_COLORS: Record<JointGroup, string> = {
@@ -36,13 +42,30 @@ export function renderPose(
   canvasHeight: number,
   options: RenderOptions
 ): void {
-  const { visible, showSkeleton, color, skeletonColor, scale = 1 } = options
+  const {
+    visible,
+    showSkeleton,
+    color,
+    skeletonColor,
+    scale = 1,
+    dominantHand = null,
+  } = options
 
   // Build a map of landmark id -> pixel coords. Low-confidence landmarks
   // are dropped entirely so bones with an uncertain endpoint also drop out.
+  // When dominantHand is set, also drop the off-hand elbow and wrist so
+  // bones touching those endpoints (shoulder-elbow, elbow-wrist) disappear
+  // too without a separate bone filter.
+  const offHandIds: number[] =
+    dominantHand === 'right'
+      ? [LANDMARK_INDICES.LEFT_ELBOW, LANDMARK_INDICES.LEFT_WRIST]
+      : dominantHand === 'left'
+        ? [LANDMARK_INDICES.RIGHT_ELBOW, LANDMARK_INDICES.RIGHT_WRIST]
+        : []
   const pixelMap = new Map<number, { x: number; y: number }>()
   for (const lm of frame.landmarks) {
     if (lm.visibility < VISIBILITY_CUTOFF) continue
+    if (offHandIds.includes(lm.id)) continue
     pixelMap.set(lm.id, {
       x: lm.x * canvasWidth,
       y: lm.y * canvasHeight,
@@ -160,7 +183,14 @@ export function renderPoseZoomed(
   bounds: { minX: number; minY: number; maxX: number; maxY: number },
   options: RenderOptions
 ): void {
-  const { visible, showSkeleton, color, skeletonColor, scale = 1 } = options
+  const {
+    visible,
+    showSkeleton,
+    color,
+    skeletonColor,
+    scale = 1,
+    dominantHand = null,
+  } = options
   const bw = bounds.maxX - bounds.minX
   const bh = bounds.maxY - bounds.minY
   if (bw <= 0 || bh <= 0) return
@@ -172,10 +202,17 @@ export function renderPoseZoomed(
   })
 
   // Hard cutoff matches renderPose: uncertain landmarks drop out rather
-  // than ghost in at low opacity.
+  // than ghost in at low opacity. Off-hand filter mirrors renderPose too.
+  const offHandIds: number[] =
+    dominantHand === 'right'
+      ? [LANDMARK_INDICES.LEFT_ELBOW, LANDMARK_INDICES.LEFT_WRIST]
+      : dominantHand === 'left'
+        ? [LANDMARK_INDICES.RIGHT_ELBOW, LANDMARK_INDICES.RIGHT_WRIST]
+        : []
   const pixelMap = new Map<number, { x: number; y: number }>()
   for (const lm of frame.landmarks) {
     if (lm.visibility < VISIBILITY_CUTOFF) continue
+    if (offHandIds.includes(lm.id)) continue
     const p = toPixel(lm.x, lm.y)
     pixelMap.set(lm.id, { x: p.x, y: p.y })
   }

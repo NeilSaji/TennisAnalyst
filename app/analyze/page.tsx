@@ -32,6 +32,15 @@ export default function AnalyzePage() {
   const { user, loading: authLoading } = useUser()
   const { profile, skipped, loading: profileLoading } = useProfile()
   const isAdvanced = !profileLoading && profile?.skill_tier === 'advanced'
+  // Off-hand suppression: forehand always uses one arm only, so hide the
+  // off-hand's elbow/wrist (and its trail) to reduce visual noise. Only
+  // applies when we actually know the player's dominant hand — falls back
+  // to showing both sides if profile didn't declare it. Extend to
+  // one-handed backhand / serve here when those are ready.
+  const dominantHand: 'left' | 'right' | null =
+    shotType === 'forehand' && profile?.dominant_hand
+      ? profile.dominant_hand
+      : null
   // Show the "set your profile" hint only to users who explicitly skipped
   // onboarding — onboarded users already have a tier, anons can't persist one.
   const showProfileHint = !profileLoading && skipped && !profile
@@ -218,6 +227,7 @@ export default function AnalyzePage() {
                   visible={visible}
                   showSkeleton={showSkeleton}
                   showTrail={showTrail}
+                  dominantHand={dominantHand}
                   showControls
                   className="p-2"
                 />

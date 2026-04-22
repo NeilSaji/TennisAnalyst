@@ -38,6 +38,12 @@ interface VideoCanvasProps {
   showTrail: boolean
   /** Render the racket-head trail (schema v2 only; no-op on legacy clips). */
   showRacket?: boolean
+  /**
+   * Hide the off-hand's elbow/wrist (and its swing-path trail) so the
+   * overlay focuses on the racket arm. 'right' keeps right side, 'left'
+   * keeps left, null shows both. Shoulders stay visible on both sides.
+   */
+  dominantHand?: 'left' | 'right' | null
   overlayColor?: string
   overlaySkeletonColor?: string
   syncedTime?: number
@@ -62,6 +68,7 @@ export default function VideoCanvas({
   showSkeleton,
   showTrail,
   showRacket = false,
+  dominantHand = null,
   overlayColor,
   overlaySkeletonColor,
   syncedTime,
@@ -156,6 +163,7 @@ export default function VideoCanvas({
         tracerRef.current.render(ctx, {
           showWristTrails: showTrail,
           showRacketTrail: showRacket,
+          dominantHand,
         })
       }
 
@@ -165,6 +173,7 @@ export default function VideoCanvas({
         showSkeleton,
         color: overlayColor,
         skeletonColor: overlaySkeletonColor,
+        dominantHand,
       })
     },
     [
@@ -172,6 +181,7 @@ export default function VideoCanvas({
       showSkeleton,
       showTrail,
       showRacket,
+      dominantHand,
       overlayColor,
       overlaySkeletonColor,
       pickFrameAtTime,

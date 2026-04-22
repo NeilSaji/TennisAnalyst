@@ -281,6 +281,68 @@ describe('SwingPathTracer', () => {
     expect(mockCtx.beginPath).not.toHaveBeenCalled()
   })
 
+  it('dominantHand=right suppresses the left wrist trail', () => {
+    // Both wrists visible for 6 frames, so both trails would normally render.
+    for (let i = 0; i < 6; i++) {
+      tracer.push(
+        makeFrame(i, i * 33, [
+          makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.5 + i * 0.01, 0.5, 1.0),
+          makeLandmark(LANDMARK_INDICES.LEFT_WRIST, 0.3 + i * 0.01, 0.3, 1.0),
+        ]),
+        800,
+        600,
+      )
+    }
+
+    const bothCtx = createMockCanvasContext()
+    tracer.render(bothCtx as unknown as CanvasRenderingContext2D, {
+      showWristTrails: true,
+      dominantHand: null,
+    })
+    const rightOnlyCtx = createMockCanvasContext()
+    tracer.render(rightOnlyCtx as unknown as CanvasRenderingContext2D, {
+      showWristTrails: true,
+      dominantHand: 'right',
+    })
+
+    // One trail's worth of beginPath calls should be roughly half of two
+    // trails'. Exact count isn't what we're asserting — just that the
+    // dominantHand=right render is strictly fewer calls than null.
+    expect(rightOnlyCtx.beginPath.mock.calls.length).toBeLessThan(
+      bothCtx.beginPath.mock.calls.length,
+    )
+    expect(rightOnlyCtx.beginPath.mock.calls.length).toBeGreaterThan(0)
+  })
+
+  it('dominantHand=left suppresses the right wrist trail', () => {
+    for (let i = 0; i < 6; i++) {
+      tracer.push(
+        makeFrame(i, i * 33, [
+          makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.5 + i * 0.01, 0.5, 1.0),
+          makeLandmark(LANDMARK_INDICES.LEFT_WRIST, 0.3 + i * 0.01, 0.3, 1.0),
+        ]),
+        800,
+        600,
+      )
+    }
+
+    const bothCtx = createMockCanvasContext()
+    tracer.render(bothCtx as unknown as CanvasRenderingContext2D, {
+      showWristTrails: true,
+      dominantHand: null,
+    })
+    const leftOnlyCtx = createMockCanvasContext()
+    tracer.render(leftOnlyCtx as unknown as CanvasRenderingContext2D, {
+      showWristTrails: true,
+      dominantHand: 'left',
+    })
+
+    expect(leftOnlyCtx.beginPath.mock.calls.length).toBeLessThan(
+      bothCtx.beginPath.mock.calls.length,
+    )
+    expect(leftOnlyCtx.beginPath.mock.calls.length).toBeGreaterThan(0)
+  })
+
   it('only adds right wrist when left wrist is invisible', () => {
     for (let i = 0; i < 5; i++) {
       tracer.push(

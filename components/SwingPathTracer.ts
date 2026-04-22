@@ -19,6 +19,10 @@ export type SwingPathRenderOptions = {
   racketColor?: string
   showRacketTrail?: boolean
   showWristTrails?: boolean
+  // When set, only the named side's wrist trail renders. Mirrors the
+  // off-hand filter in PoseRenderer so forehand / one-handed backhand /
+  // serve views show a single swing-arm trail instead of both.
+  dominantHand?: 'left' | 'right' | null
 }
 
 // Maintains a rolling buffer of wrist (and racket-head) positions for swing
@@ -87,6 +91,7 @@ export class SwingPathTracer {
         racketColor: '#fbbf24',
         showRacketTrail: true,
         showWristTrails: true,
+        dominantHand: null,
       }
     } else {
       opts = {
@@ -95,16 +100,23 @@ export class SwingPathTracer {
         racketColor: rightColorOrOptions.racketColor ?? '#fbbf24',
         showRacketTrail: rightColorOrOptions.showRacketTrail ?? true,
         showWristTrails: rightColorOrOptions.showWristTrails ?? true,
+        dominantHand: rightColorOrOptions.dominantHand ?? null,
       }
     }
 
     if (opts.showWristTrails) {
-      this.drawTrail(ctx, this.rightWristTrail, opts.rightColor, {
-        tipRadius: 5,
-      })
-      this.drawTrail(ctx, this.leftWristTrail, opts.leftColor, {
-        tipRadius: 5,
-      })
+      // dominantHand === 'right' hides left trail; 'left' hides right; null
+      // shows both (back-compat).
+      if (opts.dominantHand !== 'left') {
+        this.drawTrail(ctx, this.rightWristTrail, opts.rightColor, {
+          tipRadius: 5,
+        })
+      }
+      if (opts.dominantHand !== 'right') {
+        this.drawTrail(ctx, this.leftWristTrail, opts.leftColor, {
+          tipRadius: 5,
+        })
+      }
     }
     if (opts.showRacketTrail) {
       this.drawTrail(ctx, this.racketTrail, opts.racketColor, {
