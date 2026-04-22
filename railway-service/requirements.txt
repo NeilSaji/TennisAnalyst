@@ -13,3 +13,7 @@ scenedetect[opencv]>=0.6.4
 # pinning the package effectively pins the weights we ship to Railway.
 ultralytics==8.3.40
 onnxruntime>=1.18.0
+# rtmlib is the dependency-light wrapper around RTMPose ONNX models.
+# Pinned so the model URL it downloads (RTMPose-m body7) doesn't move
+# under us between deploys.
+rtmlib==0.0.15
