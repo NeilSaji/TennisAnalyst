@@ -60,10 +60,17 @@ __pycache__/
 __MACOSX/
 .claude/
 
-# rtmpose / yolo model weights. Fetched at install/runtime by rtmlib;
-# committed copies were accidentally swept into 46e1b47, removed in the
-# follow-up. Roughly 25MB combined.
-railway-service/models/
+# rtmpose / yolo model weights.
+# Broad default: ignore *.onnx / *.pt anywhere in the repo so stray
+# downloads aren't tracked.
+# Exception: railway-service/models/yolo11n.* is committed intentionally,
+# because Railway's cold-start YOLO autodownload was silently failing
+# ("Racket detected 0 / N" on every clip). Shipping the ~15MB of weights
+# in-repo is the reliability win — the alternative is a build-phase
+# prefetch in nixpacks, which adds a moving part we can't easily debug.
 *.onnx
 *.onnx.data
 *.pt
+!railway-service/models/yolo11n.onnx
+!railway-service/models/yolo11n.onnx.data
+!railway-service/models/yolo11n.pt
