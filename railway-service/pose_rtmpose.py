@@ -302,11 +302,12 @@ def _decode_yolo_output(
     ]
 
 
-def detect_person_bbox(frame_bgr: np.ndarray) -> Optional[tuple[float, float, float, float, float]]:
-    """Run YOLO11n on a BGR frame and return the highest-confidence person bbox.
-
-    Returns (x1, y1, x2, y2, confidence) in image pixel coords, or None
-    when no person crosses the confidence threshold.
+def _yolo_person_candidates(
+    frame_bgr: np.ndarray,
+) -> tuple[list[tuple[float, float, float, float, float]], int, int]:
+    """Run YOLO11n on a BGR frame and return ALL person candidates above
+    the confidence threshold, plus the original (w, h). Shared between
+    the stateless `detect_person_bbox` and the tracked variant.
     """
     _ensure_yolo()
     assert _yolo_session is not None and _yolo_input_name is not None
@@ -325,10 +326,40 @@ def detect_person_bbox(frame_bgr: np.ndarray) -> Optional[tuple[float, float, fl
     candidates = _decode_yolo_output(
         out, scale, pad, w, h, PERSON_CLASS_ID, PERSON_CONFIDENCE_THRESHOLD,
     )
+    return candidates, w, h
+
+
+def detect_person_bbox(frame_bgr: np.ndarray) -> Optional[tuple[float, float, float, float, float]]:
+    """Run YOLO11n on a BGR frame and return the highest-confidence person bbox.
+
+    Stateless version kept for back-compat with existing callers/tests.
+    Production extraction uses `detect_person_bbox_tracked` below, which
+    replaces raw max-confidence selection with area/centrality scoring
+    plus IoU-based association across frames (fixes the ghost-skeleton
+    bug where a small high-conf background figure beat the real player).
+    """
+    candidates, _w, _h = _yolo_person_candidates(frame_bgr)
     if not candidates:
         return None
     # Highest-confidence detection wins.
     return max(candidates, key=lambda c: c[4])
+
+
+def detect_person_bbox_tracked(
+    tracker,  # tracking.PersonTracker
+    frame_bgr: np.ndarray,
+) -> Optional[tuple[float, float, float, float, float]]:
+    """Run YOLO and fold all person candidates through `tracker`.
+
+    The tracker picks the right person on cold start (largest × centered ×
+    person-shaped, not max-conf) and sticks to it via IoU association on
+    subsequent frames. Returns the tracker's canonical bbox for this
+    frame, which may be a smoothed blend of the new YOLO detection and
+    the previous reference, or a coasted previous reference when YOLO
+    missed this frame.
+    """
+    candidates, w, h = _yolo_person_candidates(frame_bgr)
+    return tracker.update(candidates, w, h)
 
 
 def expand_bbox(
@@ -422,14 +453,27 @@ def coco17_to_blazepose33(
 # ---------------------------------------------------------------------------
 
 
-def infer_pose_for_frame(frame_bgr: np.ndarray) -> Optional[list[dict]]:
+def infer_pose_for_frame(
+    frame_bgr: np.ndarray,
+    person_tracker=None,  # Optional[tracking.PersonTracker]
+) -> Optional[list[dict]]:
     """Detect a person and run RTMPose-m on a single BGR frame.
+
+    When `person_tracker` is passed, it is fed every frame's YOLO
+    candidates and returns a locked, smoothed bbox (see
+    `detect_person_bbox_tracked`). Without a tracker, falls back to the
+    stateless max-confidence pick — kept for unit tests and one-off
+    callers. Extraction loops always pass a tracker so the ghost-person
+    selection bug can't recur.
 
     Returns a 33-entry BlazePose-shaped landmark list, or None when no
     person is detected (caller should skip the frame, matching the
     existing main.py path that drops frames without a detection).
     """
-    bbox = detect_person_bbox(frame_bgr)
+    if person_tracker is not None:
+        bbox = detect_person_bbox_tracked(person_tracker, frame_bgr)
+    else:
+        bbox = detect_person_bbox(frame_bgr)
     if bbox is None:
         return None
 
@@ -487,8 +531,10 @@ __all__ = [
     "_letterbox_for_yolo",
     "_reset_for_tests",
     "_set_model_dir",
+    "_yolo_person_candidates",
     "coco17_to_blazepose33",
     "detect_person_bbox",
+    "detect_person_bbox_tracked",
     "expand_bbox",
     "infer_pose_for_frame",
 ]

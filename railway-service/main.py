@@ -293,6 +293,7 @@ def _extract_with_rtmpose(
     index-finger landmarks (BlazePose 19/20) aren't filled.
     """
     from pose_rtmpose import infer_pose_for_frame  # local import: heavy onnx setup
+    from tracking import PersonTracker
 
     detect_racket = _try_load_racket_detector()
 
@@ -307,6 +308,9 @@ def _extract_with_rtmpose(
     frame_index = 0
     processed_index = 0
 
+    # See _extract_rtmpose in extract_clip_keypoints.py for rationale.
+    person_tracker = PersonTracker()
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -317,7 +321,7 @@ def _extract_with_rtmpose(
         if frame_index % frame_interval == 0:
             timestamp_ms = int((frame_index / video_fps) * 1000)
             try:
-                landmarks = infer_pose_for_frame(frame)
+                landmarks = infer_pose_for_frame(frame, person_tracker=person_tracker)
             except Exception as e:  # noqa: BLE001
                 # Skip the frame on detector failure rather than aborting the
                 # whole clip -- one bad frame shouldn't lose the whole swing.

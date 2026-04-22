@@ -305,6 +305,7 @@ def _extract_mediapipe(video_path, sample_fps):
 
 def _extract_rtmpose(video_path, sample_fps):
     from pose_rtmpose import infer_pose_for_frame
+    from tracking import PersonTracker
 
     detect_racket = _try_load_racket_detector()
 
@@ -318,6 +319,13 @@ def _extract_rtmpose(video_path, sample_fps):
     frame_index = 0
     processed_index = 0
 
+    # Single PersonTracker instance threaded through the whole clip.
+    # Fixes the "ghost-skeleton on an empty part of the court" bug where
+    # YOLO picked a small high-conf background figure over the larger
+    # foreground player. Tracker cold-starts on the first frame with
+    # area×centrality×aspect scoring and locks on via IoU from there.
+    person_tracker = PersonTracker()
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -326,7 +334,7 @@ def _extract_rtmpose(video_path, sample_fps):
         if frame_index % frame_interval == 0:
             timestamp_ms = int((frame_index / video_fps) * 1000)
             try:
-                landmarks = infer_pose_for_frame(frame)
+                landmarks = infer_pose_for_frame(frame, person_tracker=person_tracker)
             except Exception as e:  # noqa: BLE001
                 print(f"[extract:rtmpose] inference failed on frame {frame_index}: {e}", file=sys.stderr)
                 landmarks = None

@@ -119,7 +119,7 @@ class TestRtmposeExtractWithStubs:
 
         # Stub pose inference: every frame returns a synthetic 33-landmark
         # dict with shoulders / elbows visible.
-        def fake_infer(_frame):
+        def fake_infer(_frame, person_tracker=None):
             return [
                 {
                     "id": i,
