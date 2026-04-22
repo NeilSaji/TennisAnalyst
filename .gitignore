@@ -59,3 +59,11 @@ __pycache__/
 *.pyc
 __MACOSX/
 .claude/
+
+# rtmpose / yolo model weights. Fetched at install/runtime by rtmlib;
+# committed copies were accidentally swept into 46e1b47, removed in the
+# follow-up. Roughly 25MB combined.
+railway-service/models/
+*.onnx
+*.onnx.data
+*.pt
