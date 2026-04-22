@@ -1,0 +1,8 @@
+# Railway (nixpacks) build config for the pose microservice.
+#
+# Adds ffmpeg to the runtime image so /trim-video can stream-copy MP4
+# segments for the baseline-from-segment flow. The default nixpacks Python
+# image does not include ffmpeg.
+
+[phases.setup]
+aptPkgs = ["ffmpeg"]

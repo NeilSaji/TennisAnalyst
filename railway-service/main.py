@@ -8,6 +8,7 @@ import asyncio
 import os
 import math
 import re
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -611,13 +612,22 @@ async def _upload_clip_to_blob(clip_path: str, shot_type: str) -> str:
 
     Requires BLOB_READ_WRITE_TOKEN in the environment.
     """
+    return await _upload_file_to_blob(clip_path, f"pro-clips/{shot_type}/{uuid.uuid4()}.mp4")
+
+
+async def _upload_file_to_blob(local_path: str, blob_path: str) -> str:
+    """Upload an arbitrary local file to Vercel Blob at *blob_path* and return the public URL.
+
+    Requires BLOB_READ_WRITE_TOKEN in the environment. *blob_path* is treated
+    as the pathname inside the store and must not start with '/'.
+    """
     blob_token = os.environ.get("BLOB_READ_WRITE_TOKEN")
     if not blob_token:
         raise RuntimeError("BLOB_READ_WRITE_TOKEN not set — cannot upload clips")
 
-    filename = f"pro-clips/{shot_type}/{uuid.uuid4()}.mp4"
+    filename = blob_path.lstrip("/")
 
-    with open(clip_path, "rb") as f:
+    with open(local_path, "rb") as f:
         file_bytes = f.read()
 
     async with httpx.AsyncClient(timeout=120) as client:
@@ -800,6 +810,115 @@ async def classify_angle(
                 os.unlink(tmp_path)
             except OSError as e:  # noqa: BLE001
                 print(f"[classify-angle] temp cleanup failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Segment trimming for baseline capture
+# ---------------------------------------------------------------------------
+#
+# Trims a source video by [start_ms, end_ms] using ffmpeg stream-copy and
+# uploads the result to Vercel Blob. Stream-copy (no re-encode) keeps the
+# clip lossless and avoids a multi-second CPU hit per call; ffmpeg will snap
+# the cut to the nearest keyframe, which is accurate enough for a baseline
+# thumbnail/preview.
+#
+# Requires ffmpeg on PATH (nixpacks.toml provides it) and BLOB_READ_WRITE_TOKEN.
+
+
+class TrimVideoRequest(BaseModel):
+    video_url: str
+    start_ms: int
+    end_ms: int
+
+
+def _trim_with_ffmpeg(src_path: str, dst_path: str, start_ms: int, end_ms: int) -> None:
+    """Stream-copy the [start_ms, end_ms] range from src_path to dst_path.
+
+    Raises RuntimeError with the captured stderr if ffmpeg fails.
+    """
+    start_s = max(0, start_ms) / 1000.0
+    duration_s = max(0, end_ms - start_ms) / 1000.0
+    if duration_s <= 0:
+        raise RuntimeError("end_ms must be greater than start_ms")
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start_s:.3f}",
+        "-i",
+        src_path,
+        "-t",
+        f"{duration_s:.3f}",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        dst_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg trim failed (exit {result.returncode}): {result.stderr[:2000]}"
+        )
+
+
+@app.post("/trim-video")
+async def trim_video(
+    req: TrimVideoRequest,
+    authorization: str = Header(default=""),
+):
+    """Download *video_url*, trim to [start_ms, end_ms], upload to Vercel Blob.
+
+    Returns { blob_url }. Uses stream-copy (no re-encode) so it's fast and
+    lossless but cuts snap to the nearest keyframe.
+    """
+    expected = f"Bearer {EXTRACT_API_KEY}"
+    if authorization != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not _is_url_allowed(req.video_url):
+        raise HTTPException(
+            status_code=400,
+            detail="video_url must use https and point to an allowed storage domain",
+        )
+
+    if req.end_ms <= req.start_ms:
+        raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+
+    src_path: str | None = None
+    dst_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as src:
+            src_path = src.name
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as dst:
+            dst_path = dst.name
+
+        async with httpx.AsyncClient(timeout=300) as client:
+            response = await client.get(req.video_url)
+            response.raise_for_status()
+            with open(src_path, "wb") as f:
+                f.write(response.content)
+
+        await asyncio.to_thread(
+            _trim_with_ffmpeg, src_path, dst_path, req.start_ms, req.end_ms
+        )
+
+        blob_path = f"baseline-trims/{uuid.uuid4()}.mp4"
+        blob_url = await _upload_file_to_blob(dst_path, blob_path)
+        return {"blob_url": blob_url}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        print(f"[trim-video] failed for {req.video_url}: {e}")
+        raise HTTPException(status_code=500, detail=f"trim failed: {e}")
+    finally:
+        for p in (src_path, dst_path):
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError as e:  # noqa: BLE001
+                    print(f"[trim-video] temp cleanup failed: {e}")
 
 
 @app.get("/health")
