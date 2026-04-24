@@ -4,6 +4,7 @@ import { useRef, useState, useEffect } from 'react'
 import { upload } from '@vercel/blob/client'
 import { usePoseStore } from '@/store'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
+import { getPoseLandmarker } from '@/lib/mediapipe'
 import type { PoseFrame } from '@/lib/supabase'
 
 function safeBlobFilename(name: string): string {
@@ -29,11 +30,20 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
   const [statusMsg, setStatusMsg] = useState('')
   const [overallProgress, setOverallProgress] = useState(0)
   const [busy, setBusy] = useState(false)
+  // Whether the MediaPipe model is currently downloading. Drives the
+  // indeterminate-spinner UI so a 15-20s model load doesn't read as a
+  // stuck progress bar (root cause of the "stuck at 25%" bug class).
+  const [modelLoading, setModelLoading] = useState(false)
+  // Last successfully-uploaded file, kept so the retry button can re-run
+  // pose extraction without re-uploading to Vercel Blob (saves the user
+  // ~30s on every retry).
+  const [lastFile, setLastFile] = useState<File | null>(null)
+  const [showRetry, setShowRetry] = useState(false)
 
   const { setFramesData, setBlobUrl, setLocalVideoUrl, setProcessing, isProcessing, setShotType: persistShotType } =
     usePoseStore()
 
-  const { extract, progress: extractProgress, error: extractError, isProcessing: extracting } = usePoseExtractor()
+  const { extract, progress: extractProgress, error: extractError, isProcessing: extracting, abort } = usePoseExtractor()
 
   // Reset only the processing flag when UploadZone mounts fresh (e.g. after back-button).
   // Don't clear framesData/blobUrl/localVideoUrl - those are needed by VideoCanvas.
@@ -50,46 +60,84 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     setOverallProgress(25 + Math.round((extractProgress / 100) * 65))
   }, [extractProgress, extracting])
 
-  // Surface extractor errors
+  // Surface extractor errors and arm the retry button so the user can
+  // re-run extraction without re-uploading the file.
   useEffect(() => {
-    if (extractError) setStatusMsg(extractError)
+    if (extractError) {
+      setStatusMsg(extractError)
+      setShowRetry(true)
+    }
   }, [extractError])
 
-  const processVideo = async (file: File) => {
+  const processVideo = async (file: File, opts: { skipUpload?: boolean; cachedBlobUrl?: string } = {}) => {
     setBusy(true)
     setProcessing(true)
+    setShowRetry(false)
     setOverallProgress(0)
     setStatusMsg('Uploading video...')
 
     // 1. Upload directly to Vercel Blob via a signed client token. Going
     //    through the API route would hit Vercel's serverless body limit
     //    (4.5MB Hobby / ~100MB Pro) and fail for any real swing clip.
+    //
+    // Retry path: skipUpload=true reuses the cached blob URL from the
+    // previous attempt so a failed extraction doesn't re-upload the
+    // (potentially large) file. Saves ~30s per retry.
     let blobUrl: string
-    try {
-      const blobPath = `videos/${Date.now()}-${safeBlobFilename(file.name)}`
-      const blob = await upload(blobPath, file, {
-        access: 'public',
-        handleUploadUrl: '/api/upload',
-        contentType: file.type,
-      })
-      blobUrl = blob.url
+    if (opts.skipUpload && opts.cachedBlobUrl) {
+      blobUrl = opts.cachedBlobUrl
       setBlobUrl(blobUrl)
+    } else {
+      try {
+        const blobPath = `videos/${Date.now()}-${safeBlobFilename(file.name)}`
+        const blob = await upload(blobPath, file, {
+          access: 'public',
+          handleUploadUrl: '/api/upload',
+          contentType: file.type,
+        })
+        blobUrl = blob.url
+        setBlobUrl(blobUrl)
+      } catch {
+        setStatusMsg('Upload failed. Please try again.')
+        setShowRetry(true)
+        setProcessing(false)
+        setBusy(false)
+        return
+      }
+    }
+
+    // Cache the file + blob URL on the component so the retry button
+    // can call back into processVideo without re-uploading.
+    setLastFile(file)
+
+    setOverallProgress(15)
+    setStatusMsg('Loading pose model...')
+    // Explicit model-load step. The first time anyone uploads, the
+    // pose_landmarker_heavy weights download from MediaPipe's CDN
+    // (~16MB, ~5-15s on typical mobile networks). Awaiting it here gives
+    // us a clean place to switch to "Analyzing" once the model is hot,
+    // and lets the UI render an indeterminate spinner during the wait
+    // instead of a stuck progress bar.
+    setModelLoading(true)
+    try {
+      await getPoseLandmarker()
     } catch {
-      setStatusMsg('Upload failed. Please try again.')
+      setStatusMsg('Failed to load pose model. Check your connection and tap Retry.')
+      setShowRetry(true)
+      setModelLoading(false)
       setProcessing(false)
       setBusy(false)
       return
     }
-
-    setOverallProgress(15)
-    setStatusMsg('Loading pose model...')
+    setModelLoading(false)
 
     setOverallProgress(25)
     setStatusMsg('Analyzing pose from video...')
 
     const result = await extract(file)
     if (!result) {
-      // Hook handled status/error; just release the processing lock
+      // Hook handled status/error; just release the processing lock.
+      // showRetry is already set by the extractError effect.
       setProcessing(false)
       setBusy(false)
       return
@@ -146,6 +194,23 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     if (file) handleFile(file)
   }
 
+  const handleRetry = () => {
+    if (!lastFile) return
+    // Reuse the cached blob URL so we don't re-upload a 100MB clip
+    // every time the user retries an extraction failure.
+    const cached = usePoseStore.getState().blobUrl ?? undefined
+    processVideo(lastFile, { skipUpload: !!cached, cachedBlobUrl: cached ?? undefined })
+  }
+
+  const handleCancel = () => {
+    abort()
+    setStatusMsg('Cancelled.')
+    setShowRetry(true)
+    setProcessing(false)
+    setBusy(false)
+    setModelLoading(false)
+  }
+
   const processing = busy || extracting
 
   return (
@@ -197,13 +262,44 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
           <div className="space-y-4">
             <div className="text-4xl">🎾</div>
             <p className="text-white font-medium">{statusMsg}</p>
-            <div className="w-full bg-white/10 rounded-full h-2 overflow-hidden">
-              <div
-                className="h-full bg-emerald-400 rounded-full transition-all duration-300"
-                style={{ width: `${overallProgress}%` }}
-              />
-            </div>
-            <p className="text-white/50 text-sm">{overallProgress}%</p>
+            {modelLoading ? (
+              // Indeterminate animated bar during the MediaPipe model
+              // download. Honest signal: "actively loading" rather than
+              // "stuck at 25%". The pulse stripe slides infinitely.
+              <div className="w-full bg-white/10 rounded-full h-2 overflow-hidden relative">
+                <div
+                  className="absolute inset-y-0 w-1/3 bg-emerald-400 rounded-full animate-pulse"
+                  style={{
+                    animation: 'upload-zone-pulse 1.4s ease-in-out infinite',
+                  }}
+                />
+                <style>{`
+                  @keyframes upload-zone-pulse {
+                    0%, 100% { left: 0%; opacity: 0.5; }
+                    50% { left: 66.6%; opacity: 1; }
+                  }
+                `}</style>
+              </div>
+            ) : (
+              <div className="w-full bg-white/10 rounded-full h-2 overflow-hidden">
+                <div
+                  className="h-full bg-emerald-400 rounded-full transition-all duration-300"
+                  style={{ width: `${overallProgress}%` }}
+                />
+              </div>
+            )}
+            <p className="text-white/50 text-sm">
+              {modelLoading ? 'Loading model (one-time, ~10s)' : `${overallProgress}%`}
+            </p>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                handleCancel()
+              }}
+              className="text-xs text-white/60 hover:text-white underline transition-colors"
+            >
+              Cancel
+            </button>
           </div>
         ) : (
           <div className="space-y-3">
@@ -215,7 +311,18 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
               MP4, MOV, WebM · Max 200MB · Select shot type above first
             </p>
             {statusMsg && (
-              <p className={`${/fail|error|please/i.test(statusMsg) ? 'text-red-400' : 'text-emerald-400'} text-sm font-medium`}>{statusMsg}</p>
+              <p className={`${/fail|error|please|cancel/i.test(statusMsg) ? 'text-red-400' : 'text-emerald-400'} text-sm font-medium`}>{statusMsg}</p>
+            )}
+            {showRetry && lastFile && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleRetry()
+                }}
+                className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-medium transition-colors"
+              >
+                Retry analysis
+              </button>
             )}
           </div>
         )}
