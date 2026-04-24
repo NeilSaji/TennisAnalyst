@@ -101,6 +101,30 @@ class AbortError extends Error {
   }
 }
 
+// Race a promise against a timeout. The original failure mode (no
+// timeout, no user-visible error) was the thing that made iOS Safari
+// bugs look like "stuck at 25%" rather than "extraction failed because
+// X" — fail fast with a specific message so the caller can surface it.
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      (v) => {
+        clearTimeout(t)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(t)
+        reject(e)
+      },
+    )
+  })
+}
+
 /**
  * Extract pose keypoints from every ~1/fps second of a video File.
  *
@@ -135,19 +159,51 @@ export async function extractPoseFromVideo(
   videoEl.src = objectUrl
 
   try {
-    await new Promise<void>((resolve) => {
-      videoEl.onloadedmetadata = () => resolve()
-    })
+    // iOS Safari bug #1: loadedmetadata sometimes never fires for
+    // videos loaded via URL.createObjectURL — extraction hangs at
+    // "25% — Analyzing pose from video..." forever. Surface a concrete
+    // error after 15s instead of hanging silently.
+    await withTimeout(
+      new Promise<void>((resolve) => {
+        if (videoEl.readyState >= 1) {
+          resolve()
+          return
+        }
+        videoEl.onloadedmetadata = () => resolve()
+      }),
+      15_000,
+      'Video metadata never loaded (codec unsupported or file corrupt?). Try re-recording with "Most Compatible" format in iPhone Settings → Camera → Formats.',
+    )
     check()
 
     // loadedmetadata only guarantees dimensions/duration, not a decodable frame.
     if (videoEl.readyState < 3) {
-      await new Promise<void>((resolve) => {
-        videoEl.oncanplay = () => {
-          videoEl.oncanplay = null
-          resolve()
-        }
-      })
+      await withTimeout(
+        new Promise<void>((resolve) => {
+          videoEl.oncanplay = () => {
+            videoEl.oncanplay = null
+            resolve()
+          }
+        }),
+        15_000,
+        'Video failed to become playable in time.',
+      )
+    }
+    check()
+
+    // iOS Safari bug #2: currentTime-seeks don't fire onseeked reliably
+    // until the video has been played at least once — the decoder
+    // doesn't prime itself on metadata alone. Brief play-then-pause
+    // primes the decoder so the seek-loop below actually advances.
+    // No-op on browsers that don't need it, so safe everywhere.
+    try {
+      await videoEl.play()
+      videoEl.pause()
+    } catch {
+      // Some autoplay policies reject play() even with muted+playsInline.
+      // If priming fails, the seek loop's 3s per-frame timeout still
+      // bounds the damage -- worst case frames get skipped but the
+      // extraction doesn't hang.
     }
     check()
 
