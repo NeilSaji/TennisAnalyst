@@ -159,10 +159,9 @@ export async function extractPoseFromVideo(
   videoEl.src = objectUrl
 
   try {
-    // iOS Safari bug #1: loadedmetadata sometimes never fires for
-    // videos loaded via URL.createObjectURL — extraction hangs at
-    // "25% — Analyzing pose from video..." forever. Surface a concrete
-    // error after 15s instead of hanging silently.
+    // Wait for metadata (dimensions/duration). iOS Safari can stall
+    // here silently on unsupported codecs — 15s cap + concrete error
+    // beats a forever-25% bar.
     await withTimeout(
       new Promise<void>((resolve) => {
         if (videoEl.readyState >= 1) {
@@ -176,34 +175,45 @@ export async function extractPoseFromVideo(
     )
     check()
 
-    // loadedmetadata only guarantees dimensions/duration, not a decodable frame.
-    if (videoEl.readyState < 3) {
-      await withTimeout(
-        new Promise<void>((resolve) => {
-          videoEl.oncanplay = () => {
-            videoEl.oncanplay = null
-            resolve()
-          }
-        }),
-        15_000,
-        'Video failed to become playable in time.',
-      )
-    }
-    check()
-
-    // iOS Safari bug #2: currentTime-seeks don't fire onseeked reliably
-    // until the video has been played at least once — the decoder
-    // doesn't prime itself on metadata alone. Brief play-then-pause
-    // primes the decoder so the seek-loop below actually advances.
-    // No-op on browsers that don't need it, so safe everywhere.
+    // iOS Safari needs a play()/pause() to prime the video decoder
+    // BEFORE it will advance readyState past 2 or fire canplay. The
+    // previous iteration of this fix waited for canplay first and
+    // THEN called play() — order was backwards; iOS would sit on
+    // readyState 2 indefinitely and the canplay timeout tripped with
+    // "Video failed to become playable in time." Correct order: prime
+    // first, then check readyState.
+    //
+    // Muted + playsInline are set above, which satisfies every modern
+    // browser's autoplay policy. A raw play() on a just-loaded element
+    // can still be rejected on some iOS versions; that's caught and
+    // ignored — the seek loop below has a per-frame timeout so even a
+    // decoder that never truly primes won't hang the whole extraction.
     try {
       await videoEl.play()
       videoEl.pause()
     } catch {
-      // Some autoplay policies reject play() even with muted+playsInline.
-      // If priming fails, the seek loop's 3s per-frame timeout still
-      // bounds the damage -- worst case frames get skipped but the
-      // extraction doesn't hang.
+      // Priming failed. The seek loop's 3s-per-frame timeout still
+      // bounds the damage.
+    }
+    check()
+
+    // readyState 2 = HAVE_CURRENT_DATA, which is enough for drawImage
+    // to produce a valid canvas. We used to wait for readyState 3
+    // (HAVE_FUTURE_DATA) via canplay, but that's overkill — if
+    // individual frames fail to draw the existing per-frame error
+    // handling skips them.
+    if (videoEl.readyState < 2) {
+      await withTimeout(
+        new Promise<void>((resolve) => {
+          const onReady = () => {
+            videoEl.removeEventListener('loadeddata', onReady)
+            resolve()
+          }
+          videoEl.addEventListener('loadeddata', onReady)
+        }),
+        15_000,
+        'Video failed to become readable in time (often HEIF/HEVC on iPhone — try Settings → Camera → Formats → "Most Compatible").',
+      )
     }
     check()
 
