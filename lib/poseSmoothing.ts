@@ -42,29 +42,54 @@ const FALLBACK_DT = 1 / 30
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Average visibility across all landmarks in a frame. */
+/**
+ * Average visibility across DETECTED landmarks (visibility > 0). The
+ * RTMPose-via-remap pipeline fills 17 of 33 BlazePose slots from the
+ * COCO-17 model output and leaves the other 16 (eye_inner/outer, mouth,
+ * fingers, foot indices) at visibility=0 as unfilled stubs. Averaging
+ * across all 33 halves the perceived confidence and breaks the
+ * isFrameConfident gate. Treating zero-visibility entries as "not
+ * produced by the model" gives a representative average.
+ *
+ * For pure-MediaPipe input where every landmark has a real score, this
+ * is identical to the previous "average all" semantic — those values
+ * are never exactly zero.
+ */
 export function averageVisibility(landmarks: Landmark[]): number {
   if (landmarks.length === 0) return 0
   let sum = 0
+  let n = 0
   for (const lm of landmarks) {
-    sum += lm.visibility
+    if (lm.visibility > 0) {
+      sum += lm.visibility
+      n++
+    }
   }
-  return sum / landmarks.length
+  return n === 0 ? 0 : sum / n
 }
 
-/** Bounding-box area of landmarks in normalized [0,1] coordinate space. */
+/**
+ * Bounding-box area of DETECTED landmarks (visibility > 0) in
+ * normalized [0,1] coordinate space. Same rationale as
+ * averageVisibility: include zero-stub landmarks and the bbox extends
+ * to (0,0), making it artificially large or anchored at the corner.
+ */
 export function landmarkBboxArea(landmarks: Landmark[]): number {
   if (landmarks.length === 0) return 0
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity
   let maxY = -Infinity
+  let any = false
   for (const lm of landmarks) {
+    if (lm.visibility <= 0) continue
+    any = true
     if (lm.x < minX) minX = lm.x
     if (lm.y < minY) minY = lm.y
     if (lm.x > maxX) maxX = lm.x
     if (lm.y > maxY) maxY = lm.y
   }
+  if (!any) return 0
   return (maxX - minX) * (maxY - minY)
 }
 

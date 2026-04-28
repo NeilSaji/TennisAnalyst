@@ -165,6 +165,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     yoloDetections: number
     yoloTopScore: number
     kpMaxConf: number
+    kpAvgConf: number
     inferenceMs: number
     provider: string | null
   } | null>(null)
@@ -510,6 +511,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
           yoloDetections: s.yoloDetections,
           yoloTopScore: s.yoloTopScore,
           kpMaxConf: s.kpMaxConf,
+          kpAvgConf: s.kpAvgConf,
           inferenceMs: s.inferenceMs,
           provider: s.provider,
         })
@@ -901,7 +903,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
                 <span>Y:{debugStats.yoloDetections}</span>
                 <span>{debugStats.yoloTopScore.toFixed(2)}</span>
                 <span>·</span>
-                <span>KP:{debugStats.kpMaxConf.toFixed(2)}</span>
+                <span>KP:{debugStats.kpMaxConf.toFixed(2)}/{debugStats.kpAvgConf.toFixed(2)}</span>
                 <span>·</span>
                 <span>{debugStats.inferenceMs}ms</span>
                 {debugStats.provider ? <span>· {debugStats.provider}</span> : null}

@@ -97,6 +97,13 @@ export interface PoseDetectStats {
   yoloTopScore: number
   kpCount: number
   kpMaxConf: number
+  /**
+   * Mean RTMPose keypoint confidence across the 17 COCO joints. Useful
+   * because isFrameConfident gates on average visibility — kpAvg < 0.4
+   * is the symptom that drops the user into "Move into frame" even
+   * when keypoints are visible.
+   */
+  kpAvgConf: number
   inferenceMs: number
   /** Provider that actually ran (webgpu / webgl / wasm). */
   provider: ExecutionProvider | null
@@ -768,6 +775,7 @@ export async function createPoseDetector(
       yoloTopScore: 0,
       kpCount: 0,
       kpMaxConf: 0,
+      kpAvgConf: 0,
       inferenceMs: 0,
       provider,
     } as PoseDetectStats,
@@ -800,6 +808,7 @@ async function detectImpl(
   state.lastStats.yoloTopScore = 0
   state.lastStats.kpCount = 0
   state.lastStats.kpMaxConf = 0
+  state.lastStats.kpAvgConf = 0
   state.lastStats.inferenceMs = 0
 
   const { w: srcW, h: srcH } = getSourceDims(source)
@@ -937,16 +946,19 @@ async function detectImpl(
   const cocoKpts = new Float32Array(NUM_COCO_KEYPOINTS * 2)
   const cocoScores = new Float32Array(NUM_COCO_KEYPOINTS)
   let kpMaxConf = 0
+  let kpScoreSum = 0
   for (let i = 0; i < NUM_COCO_KEYPOINTS; i++) {
     const mapped = mapKeypointToFrame(decoded[i], rtmTx, cropX, cropY)
     cocoKpts[i * 2] = mapped.x
     cocoKpts[i * 2 + 1] = mapped.y
     cocoScores[i] = mapped.score
     if (mapped.score > kpMaxConf) kpMaxConf = mapped.score
+    kpScoreSum += mapped.score
   }
 
   state.lastStats.kpCount = NUM_COCO_KEYPOINTS
   state.lastStats.kpMaxConf = kpMaxConf
+  state.lastStats.kpAvgConf = kpScoreSum / NUM_COCO_KEYPOINTS
   state.lastStats.inferenceMs = Math.round(
     (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0,
   )
