@@ -172,23 +172,7 @@ def _ensure_yolo() -> None:
 
             import onnxruntime as ort
 
-            # YOLO11n + RTMPose-m are small enough that intra-op
-            # parallelism inside a single inference (matmul kernels
-            # spawning N threads) actually hurts: the synchronization
-            # overhead dominates the speedup. We instead get parallelism
-            # from the outer ThreadPoolExecutor in main._extract_with_rtmpose,
-            # which submits N concurrent inference calls. Single-thread
-            # each call so concurrent calls don't thrash on shared
-            # ORT thread pools.
-            so = ort.SessionOptions()
-            so.intra_op_num_threads = 1
-            so.inter_op_num_threads = 1
-            so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-            sess = ort.InferenceSession(
-                str(YOLO_ONNX_PATH),
-                sess_options=so,
-                providers=["CPUExecutionProvider"],
-            )
+            sess = ort.InferenceSession(str(YOLO_ONNX_PATH), providers=["CPUExecutionProvider"])
             _yolo_input_name = sess.get_inputs()[0].name
             _yolo_session = sess
         except Exception as e:
