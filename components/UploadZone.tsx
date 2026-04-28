@@ -145,7 +145,24 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
           body: JSON.stringify({ blobUrl, shotType }),
         })
         if (!pendingRes.ok) {
-          throw new Error(`create-pending failed: ${pendingRes.status}`)
+          // Surface the underlying error detail (e.g. Supabase RLS message,
+          // 'Missing service key' env failure) so the chip shows *why*,
+          // not just the HTTP status. Falls back to the raw body text if
+          // the response isn't JSON.
+          let detail = ''
+          try {
+            const errBody = await pendingRes.json()
+            detail = errBody?.detail || errBody?.error || ''
+          } catch {
+            try {
+              detail = await pendingRes.text()
+            } catch {
+              detail = ''
+            }
+          }
+          throw new Error(
+            `create-pending failed: ${pendingRes.status}${detail ? ` (${detail})` : ''}`,
+          )
         }
         const pendingBody = await pendingRes.json()
         pendingSessionId = pendingBody.sessionId
