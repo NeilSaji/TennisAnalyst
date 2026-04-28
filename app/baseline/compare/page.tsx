@@ -4,13 +4,33 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import { upload } from '@vercel/blob/client'
 import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
 import { useBaselineStore } from '@/store/baseline'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
 import { useUser } from '@/hooks/useUser'
 import { detectSwings } from '@/lib/jointAngles'
+import { extractPoseViaRailway, RailwayExtractError } from '@/lib/poseExtractionRailway'
 import type { PoseFrame, Baseline } from '@/lib/supabase'
+
+// Mirrors UploadZone's flag. When true the today's-clip extraction
+// goes through Railway (RTMPose + YOLO crop) which produces meaningfully
+// better tracing on small-in-frame subjects than browser MediaPipe.
+// Browser MediaPipe stays as the fallback if Railway is unreachable
+// or returns no result.
+const USE_RAILWAY_EXTRACT =
+  process.env.NEXT_PUBLIC_USE_RAILWAY_EXTRACT === 'true'
+
+function safeBlobFilename(name: string): string {
+  return (
+    name
+      .split(/[\\/]/)
+      .pop()!
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .slice(0, 100) || 'upload'
+  )
+}
 
 const ComparisonLayout = dynamic(() => import('@/components/ComparisonLayout'), { ssr: false })
 const MetricsComparison = dynamic(() => import('@/components/MetricsComparison'), { ssr: false })
@@ -85,12 +105,57 @@ export default function BaselineComparePage() {
 
   const processTodayVideo = async (file: File) => {
     if (!file.type.startsWith('video/')) return
-    const result = await extract(file)
-    if (!result) return
-    // Swap in the new object URL, revoke the old
+
+    let frames: PoseFrame[] | null = null
+
+    // Railway path: upload the file to Vercel Blob first (Railway pulls
+    // from a URL, not a multipart body), then create a pending session
+    // row, then queue + poll. On any failure fall through silently to
+    // the browser MediaPipe path so the compare flow never dies on a
+    // bad day for the server.
+    if (USE_RAILWAY_EXTRACT) {
+      try {
+        const blobPath = `videos/${Date.now()}-${safeBlobFilename(file.name)}`
+        const blob = await upload(blobPath, file, {
+          access: 'public',
+          handleUploadUrl: '/api/upload',
+          contentType: file.type,
+        })
+        const sessRes = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blobUrl: blob.url, shotType: selectedBaseline?.shot_type ?? 'unknown' }),
+        })
+        if (sessRes.ok) {
+          const { sessionId } = await sessRes.json()
+          const result = await extractPoseViaRailway({
+            sessionId,
+            blobUrl: blob.url,
+          })
+          frames = result.frames
+        }
+      } catch (err) {
+        if (err instanceof RailwayExtractError) {
+          console.info('[baseline/compare] Railway path unavailable, falling back to browser:', err.reason)
+        } else {
+          console.error('[baseline/compare] Railway path errored, falling back to browser:', err)
+        }
+        frames = null
+      }
+    }
+
+    // Browser MediaPipe fallback (or primary path when the feature flag
+    // is off). Always runs the local extractor so we still produce an
+    // object URL for inline playback even when Railway succeeded.
+    const localResult = await extract(file)
+    if (!localResult) return
     if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
-    setTodayObjectUrl(result.objectUrl)
-    setTodayFrames(result.frames)
+    setTodayObjectUrl(localResult.objectUrl)
+
+    // Prefer Railway frames (better quality) when available; fall back
+    // to the browser MediaPipe frames otherwise.
+    setTodayFrames(frames ?? localResult.frames)
+
     // Reset the per-swing selection on a new upload so the previous
     // clip's selection doesn't leak into a clip that may not have
     // that many swings.
