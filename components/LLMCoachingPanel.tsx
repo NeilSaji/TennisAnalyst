@@ -30,7 +30,14 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
   const [analysisEventId, setAnalysisEventId] = useState<string | null>(null)
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('idle')
 
-  const canAnalyze = framesData.length > 0
+  // Effective frames: prop-passed `frames` win (baseline/compare path
+  // sends them in directly), with the Zustand store as the fallback for
+  // the solo /analyze flow. Bug fix: previously canAnalyze checked ONLY
+  // framesData, which gated the Analyze button false whenever a user
+  // landed on /baseline/compare in a fresh session — even though both
+  // their baseline frames and today's frames were loaded via props.
+  const effectiveFrames = frames ?? framesData
+  const canAnalyze = effectiveFrames.length > 0
 
   // If the feedback text clears (e.g. reset/re-analyze), drop any lingering
   // rating state so the strip doesn't carry across runs.
@@ -49,7 +56,6 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
     setAnalysisEventId(null)
     setFeedbackState('idle')
 
-    const effectiveFrames = frames ?? framesData
     const keypointsJson = {
       fps_sampled: 30,
       frame_count: effectiveFrames.length,
