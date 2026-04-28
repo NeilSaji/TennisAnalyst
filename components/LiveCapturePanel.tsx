@@ -8,6 +8,7 @@ import { useLiveCoach } from '@/hooks/useLiveCoach'
 import { useLiveStore, type LiveStatus } from '@/store/live'
 import { usePoseStore } from '@/store'
 import { renderPose } from './PoseRenderer'
+import { getFrameAtTime } from './VideoCanvas'
 import { createStreamingLandmarkSmoother } from '@/lib/poseSmoothing'
 import { JOINT_GROUPS, type JointGroup } from '@/lib/jointAngles'
 import type { PoseFrame } from '@/lib/supabase'
@@ -154,6 +155,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   const swingPulseAtRef = useRef<number>(0)
   const rafHandleRef = useRef<number | null>(null)
   const reviewVideoRef = useRef<HTMLVideoElement | null>(null)
+  const reviewCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const [poseQuality, setPoseQuality] = useState<PoseQuality | null>(null)
   // Triggers the swing-counter scale bump. Toggles 0/1 each onSwing so
   // we always re-run the keyframe transition even on back-to-back hits.
@@ -661,6 +663,126 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     setStatus('idle')
   }, [coach, onSessionComplete, setStatus, stop])
 
+  // Whatever the live overlay was showing, the review screen replays it
+  // by syncing each captured PoseFrame to the recorded video's playback
+  // time. Lets the user verify the session was actually tracked AFTER
+  // they stop, instead of seeing a blank video and wondering. Only
+  // active during the review phase; rebinds when pendingResult changes.
+  useEffect(() => {
+    if (!pendingResult || reviewPhase !== 'review') return
+    const canvas = reviewCanvasRef.current
+    const video = reviewVideoRef.current
+    if (!canvas || !video) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const frames = pendingResult.keypoints.frames
+    if (frames.length === 0) return
+
+    let cancelled = false
+    let sizedKey: string | null = null
+
+    const draw = () => {
+      if (cancelled) return
+      const dpr = typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1
+      const vw = video.videoWidth || 0
+      const vh = video.videoHeight || 0
+      if (vw > 0 && vh > 0) {
+        const key = `${vw}x${vh}@${dpr}`
+        if (sizedKey !== key) {
+          canvas.width = vw * dpr
+          canvas.height = vh * dpr
+          ctx.setTransform(1, 0, 0, 1, 0, 0)
+          ctx.scale(dpr, dpr)
+          sizedKey = key
+        }
+      }
+      const logicalW = (canvas.width || 0) / dpr
+      const logicalH = (canvas.height || 0) / dpr
+      ctx.clearRect(0, 0, logicalW, logicalH)
+      const frame = getFrameAtTime(frames, video.currentTime)
+      if (frame && logicalW > 0 && logicalH > 0) {
+        renderPose(ctx, frame, logicalW, logicalH, {
+          visible: ALL_JOINT_GROUPS_VISIBLE,
+          showSkeleton: true,
+        })
+      }
+    }
+
+    const useRvfc =
+      typeof HTMLVideoElement !== 'undefined' &&
+      'requestVideoFrameCallback' in HTMLVideoElement.prototype
+    let rafHandle = 0
+    let rvfcHandle = 0
+
+    if (useRvfc) {
+      const tick: VideoFrameRequestCallback = () => {
+        if (cancelled) return
+        draw()
+        rvfcHandle = video.requestVideoFrameCallback(tick)
+      }
+      // Paint immediately so the still frame at t=0 has skeleton too,
+      // before playback even starts.
+      draw()
+      rvfcHandle = video.requestVideoFrameCallback(tick)
+    } else {
+      const loop = () => {
+        if (cancelled) return
+        draw()
+        rafHandle = window.requestAnimationFrame(loop)
+      }
+      rafHandle = window.requestAnimationFrame(loop)
+    }
+
+    return () => {
+      cancelled = true
+      if (rafHandle) window.cancelAnimationFrame(rafHandle)
+      if (rvfcHandle && typeof video.cancelVideoFrameCallback === 'function') {
+        try { video.cancelVideoFrameCallback(rvfcHandle) } catch { /* ignore */ }
+      }
+    }
+  }, [pendingResult, reviewPhase, reviewVideoUrl])
+
+  // Aggregate session-quality summary used for the review-screen pill.
+  // Computed once per pendingResult — averages the keypoint visibility
+  // values across all captured frames (after the average-visibility fix
+  // that ignores 0-visibility stub landmarks). Drives a green/amber/red
+  // dot mirroring the live tracking pill so the user sees at a glance
+  // whether the session was tracked well.
+  const reviewQuality = (() => {
+    if (!pendingResult) return null
+    const frames = pendingResult.keypoints.frames
+    if (frames.length === 0) return null
+    let total = 0
+    let n = 0
+    for (const f of frames) {
+      for (const lm of f.landmarks) {
+        if (lm.visibility > 0) {
+          total += lm.visibility
+          n++
+        }
+      }
+    }
+    const avg = n === 0 ? 0 : total / n
+    let label: string
+    let dotClass: string
+    let textClass: string
+    if (avg >= 0.5) {
+      label = 'Tracked well'
+      dotClass = 'bg-emerald-400'
+      textClass = 'text-emerald-300'
+    } else if (avg >= 0.3) {
+      label = 'Tracking weak'
+      dotClass = 'bg-amber-400'
+      textClass = 'text-amber-300'
+    } else {
+      label = 'Tracking failed'
+      dotClass = 'bg-red-400'
+      textClass = 'text-red-300'
+    }
+    return { avg, label, dotClass, textClass }
+  })()
+
   // Build (and tear down) the inline review player's object URL. We only
   // create one URL per pendingResult so the <video> element stays stable
   // across re-renders.
@@ -1018,14 +1140,45 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         >
           <p className="text-white font-semibold text-base">Review your session</p>
           {reviewVideoUrl ? (
-            <video
-              ref={reviewVideoRef}
-              data-testid="review-video"
-              src={reviewVideoUrl}
-              controls
-              playsInline
-              className="w-full rounded-xl bg-black"
-            />
+            <div className="relative w-full rounded-xl overflow-hidden bg-black">
+              <video
+                ref={reviewVideoRef}
+                data-testid="review-video"
+                src={reviewVideoUrl}
+                controls
+                playsInline
+                className="w-full"
+                style={{ transform: facingMode === 'user' ? 'scaleX(-1)' : undefined }}
+              />
+              {/*
+                Skeleton overlay synced to playback time. Mirrors the
+                video's CSS transform so landmarks (in raw camera coords)
+                land on the on-screen body. pointer-events:none keeps
+                the native video controls clickable through the canvas.
+              */}
+              <canvas
+                ref={reviewCanvasRef}
+                data-testid="review-overlay-canvas"
+                aria-hidden="true"
+                className="absolute inset-0 w-full h-full pointer-events-none"
+                style={{ transform: facingMode === 'user' ? 'scaleX(-1)' : undefined }}
+              />
+              {reviewQuality ? (
+                <div
+                  data-testid="review-quality-pill"
+                  className="absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-full bg-black/60 backdrop-blur px-2.5 py-1 text-xs"
+                >
+                  <span
+                    aria-hidden
+                    className={`inline-block w-1.5 h-1.5 rounded-full ${reviewQuality.dotClass}`}
+                  />
+                  <span className={reviewQuality.textClass}>{reviewQuality.label}</span>
+                  <span className="text-white/50 font-mono ml-1">
+                    {(reviewQuality.avg * 100).toFixed(0)}%
+                  </span>
+                </div>
+              ) : null}
+            </div>
           ) : null}
           <div className="flex flex-wrap gap-4 text-sm text-white/70">
             <span>
