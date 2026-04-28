@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useRef, useState } from 'react'
-import { getPoseLandmarker, getMonotonicTimestamp } from '@/lib/mediapipe'
+import { createPoseDetector, type PoseDetector } from '@/lib/browserPose'
 import { computeJointAngles } from '@/lib/jointAngles'
 import { isBodyVisible, isFrameConfident, smoothFrames } from '@/lib/poseSmoothing'
 import { classifyCameraAngle } from '@/lib/cameraAngle'
@@ -26,11 +26,25 @@ export type LiveSessionResult = {
 
 export type PoseQuality = 'good' | 'weak' | 'no-body' | 'wrong-angle'
 
+/**
+ * Phase 5D — model-load progress callback. Fires while the YOLO + RTMPose
+ * weights download on the very first session. After the first run the
+ * loader's IndexedDB/cache layer makes subsequent sessions ready in
+ * <500ms; in that case the callback may fire once at (total, total) or
+ * not at all. The UX layer is expected to debounce so a sub-300ms cache
+ * hit doesn't flash a useless loading state.
+ */
+export type ModelLoadProgress = (
+  loaded: number,
+  total: number,
+  label: 'yolo' | 'rtmpose',
+) => void
+
 export interface UseLiveCaptureOptions {
   onSwing?: (swing: StreamedSwing) => void
   onStatus?: (status: LiveCaptureStatus) => void
   // Target pose-detection rate. Real frames from getUserMedia are typically
-  // 30fps; we run detection every Nth callback to cap MediaPipe load.
+  // 30fps; we run detection every Nth callback to cap inference load.
   targetDetectionFps?: number
   /**
    * Fired only on transitions between pose-quality states (not per-frame).
@@ -57,6 +71,14 @@ export interface UseLiveCaptureOptions {
    * rather than re-rendering React state at 15fps.
    */
   onPoseFrame?: (frame: PoseFrame) => void
+  /**
+   * Phase 5D — model-load progress callback. The browser pose detector
+   * fetches YOLO11n + RTMPose-m on first instantiation; this fires while
+   * those bytes arrive so the panel can show a "Loading pose model…"
+   * progress bar before recording begins. Subsequent sessions hit the
+   * loader's cache and resolve in <500ms.
+   */
+  onModelLoadProgress?: ModelLoadProgress
 }
 
 export interface UseLiveCaptureReturn {
@@ -90,19 +112,6 @@ function pickMimeType(): string | null {
   return null
 }
 
-// Coerce raw MediaPipe landmarks into the Landmark shape the rest of the app
-// uses (same mapping as extractPoseFromVideo).
-function toLandmarks(raw: Array<{ x: number; y: number; z?: number; visibility?: number }>): Landmark[] {
-  return raw.map((lm, id) => ({
-    id,
-    name: `landmark_${id}`,
-    x: lm.x,
-    y: lm.y,
-    z: lm.z ?? 0,
-    visibility: lm.visibility ?? 1,
-  }))
-}
-
 // How long after the last good/weak detection before we declare the
 // player gone. Matches the Phase 3 spec "no-body if no detection for ~1s".
 const NO_BODY_TIMEOUT_MS = 1000
@@ -110,7 +119,14 @@ const NO_BODY_TIMEOUT_MS = 1000
 export function useLiveCapture(
   options: UseLiveCaptureOptions = {},
 ): UseLiveCaptureReturn {
-  const { onSwing, onStatus, onPoseQuality, onPoseFrame, targetDetectionFps = 15 } = options
+  const {
+    onSwing,
+    onStatus,
+    onPoseQuality,
+    onPoseFrame,
+    onModelLoadProgress,
+    targetDetectionFps = 15,
+  } = options
 
   const [status, setStatusState] = useState<LiveCaptureStatus>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -127,6 +143,11 @@ export function useLiveCapture(
   const framesRef = useRef<PoseFrame[]>([])
   const swingsRef = useRef<StreamedSwing[]>([])
   const detectorRef = useRef<LiveSwingDetector | null>(null)
+  // Browser pose detector (YOLO + RTMPose via onnxruntime-web). Created in
+  // start(), released in cleanup(). Phase 5D replaced MediaPipe here; the
+  // 33-entry BlazePose landmark shape is identical so downstream gates and
+  // smoothing remain unchanged.
+  const poseDetectorRef = useRef<PoseDetector | null>(null)
   const startedAtRef = useRef<number>(0)
   const frameCounterRef = useRef<number>(0)
   const lastDetectAtRef = useRef<number>(0)
@@ -136,8 +157,13 @@ export function useLiveCapture(
   // Wall-clock of the last frame where ANY pose was detected (good or
   // weak). Used to flip to 'no-body' when nothing has been detected for
   // NO_BODY_TIMEOUT_MS. We also poll this inside the detection loop on
-  // frames where MediaPipe returns nothing.
+  // frames where the detector returns null.
   const lastDetectionAtRef = useRef<number>(0)
+  // Guard re-entry of runOneDetection: detect() is now async, and we
+  // don't want to fire a second inference while the first is still in
+  // flight (back-pressure from a slow ONNX provider would otherwise pile
+  // up frames).
+  const inflightRef = useRef<boolean>(false)
 
   const setStatus = useCallback(
     (next: LiveCaptureStatus) => {
@@ -185,6 +211,11 @@ export function useLiveCapture(
     videoElRef.current = null
     canvasRef.current = null
     detectorRef.current = null
+    if (poseDetectorRef.current) {
+      try { poseDetectorRef.current.dispose() } catch { /* ignore */ }
+    }
+    poseDetectorRef.current = null
+    inflightRef.current = false
   }, [teardownLoop])
 
   const abort = useCallback(() => {
@@ -203,6 +234,7 @@ export function useLiveCapture(
     lastDetectAtRef.current = 0
     lastQualityRef.current = null
     lastDetectionAtRef.current = 0
+    inflightRef.current = false
     detectorRef.current = new LiveSwingDetector()
 
     setStatus('requesting-permissions')
@@ -226,21 +258,28 @@ export function useLiveCapture(
 
     setStatus('initializing')
 
-    // MediaPipe init runs in parallel with video.play — it's a ~200-500ms
-    // download on a fresh browser session.
-    const [poseLandmarker] = await Promise.all([
-      getPoseLandmarker().catch((err) => {
-        setError(err instanceof Error ? err.message : 'Pose model failed to load')
-        return null
-      }),
-    ])
-
-    if (generationRef.current !== generation) return
-    if (!poseLandmarker) {
+    // Create the ONNX pose detector. First-session cold-start downloads
+    // ~50MB of model weights and surfaces progress through
+    // onModelLoadProgress; subsequent sessions hit the loader's cache and
+    // resolve in <500ms.
+    let poseDetector: PoseDetector | null = null
+    try {
+      poseDetector = await createPoseDetector({
+        onProgress: onModelLoadProgress,
+      })
+    } catch (err) {
+      if (generationRef.current !== generation) return
+      setError(err instanceof Error ? err.message : 'Pose model failed to load')
       cleanup()
       setStatus('error')
       return
     }
+
+    if (generationRef.current !== generation) {
+      try { poseDetector?.dispose() } catch { /* ignore */ }
+      return
+    }
+    poseDetectorRef.current = poseDetector
 
     videoElRef.current = videoEl
     videoEl.srcObject = stream
@@ -295,17 +334,24 @@ export function useLiveCapture(
       onPoseQuality?.(q)
     }
 
-    const runOneDetection = (nowMs: number) => {
+    const runOneDetection = async (nowMs: number) => {
       if (generationRef.current !== generation) return
       if (nowMs - lastDetectAtRef.current < minFrameGapMs) return
+      // Drop frames while a previous inference is still running. ONNX
+      // detect() is async (and on WASM/CPU can be slow); we'd rather
+      // skip a tick than queue up backlog.
+      if (inflightRef.current) return
       lastDetectAtRef.current = nowMs
 
+      const detector = poseDetectorRef.current
+      if (!detector) return
+
+      inflightRef.current = true
       try {
         ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height)
-        const ts = getMonotonicTimestamp(nowMs - startedAtRef.current)
-        const result = poseLandmarker.detectForVideo(canvas, ts)
-        const raw = result?.landmarks?.[0]
-        if (!raw || raw.length === 0) {
+        const landmarks: Landmark[] | null = await detector.detect(canvas)
+        if (generationRef.current !== generation) return
+        if (!landmarks || landmarks.length === 0) {
           // No pose at all this frame. If it's been long enough since the
           // last hit, declare the player gone.
           if (
@@ -320,7 +366,6 @@ export function useLiveCapture(
           }
           return
         }
-        const landmarks = toLandmarks(raw)
         if (!isFrameConfident(landmarks)) {
           if (
             lastDetectionAtRef.current > 0 &&
@@ -328,7 +373,7 @@ export function useLiveCapture(
           ) {
             emitQuality('no-body')
           } else if (lastDetectionAtRef.current === 0) {
-            // First seconds of the session and MediaPipe is returning
+            // First seconds of the session and the detector is returning
             // landmarks but at low confidence. Without this branch the
             // pill stayed null forever — user saw no signal at all.
             emitQuality('no-body')
@@ -360,7 +405,7 @@ export function useLiveCapture(
 
         // Phase 1.5: camera-angle gate. Body is in frame, but if the
         // camera is square-on (or we can't tell), the swing mechanics we
-        // grade off collapse into the depth axis where MediaPipe's z is
+        // grade off collapse into the depth axis where the model's z is
         // noise. Treat this exactly like a weak frame: keep the frame in
         // framesRef so /analyze still has it, but don't feed the live
         // detector and don't count it toward warmup.
@@ -384,6 +429,8 @@ export function useLiveCapture(
         }
       } catch {
         // A single bad frame should never kill the loop
+      } finally {
+        inflightRef.current = false
       }
     }
 
@@ -395,20 +442,23 @@ export function useLiveCapture(
       const schedule = () => {
         if (generationRef.current !== generation) return
         rvfcHandleRef.current = videoEl.requestVideoFrameCallback((now) => {
-          runOneDetection(now)
+          // Fire-and-forget: schedule the next callback immediately so
+          // the rVFC cadence isn't gated on inference latency. The
+          // inflight guard inside runOneDetection prevents pile-up.
+          void runOneDetection(now)
           schedule()
         })
       }
       schedule()
     } else {
       fallbackIntervalRef.current = setInterval(
-        () => runOneDetection(performance.now()),
+        () => { void runOneDetection(performance.now()) },
         Math.round(minFrameGapMs),
       )
     }
 
     setStatus('recording')
-  }, [cleanup, onSwing, onPoseQuality, onPoseFrame, setStatus, targetDetectionFps])
+  }, [cleanup, onSwing, onPoseQuality, onPoseFrame, onModelLoadProgress, setStatus, targetDetectionFps])
 
   const stop = useCallback(async (): Promise<LiveSessionResult | null> => {
     const generation = generationRef.current
