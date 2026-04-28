@@ -53,6 +53,15 @@ export default function BaselineComparePage() {
   // When backend is the red 'rtmpose-browser-fallback', this carries
   // the failure reason for the chip tooltip + inline label.
   const [todayFallbackReason, setTodayFallbackReason] = useState<string | null>(null)
+  // Local processing state covering the WHOLE upload pipeline (blob
+  // upload + Railway extraction + browser fallback). The hook's
+  // isProcessing only flips while the browser extractor runs — when
+  // the Railway fast-path skips browser extract entirely, there's no
+  // signal to gate the click or surface progress, so the user just
+  // sees "nothing happens" while Railway extracts for 30-60s.
+  const [uploadBusy, setUploadBusy] = useState(false)
+  const [uploadStatus, setUploadStatus] = useState<string>('')
+  const [uploadError, setUploadError] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null)
   // Index (1-based) of the swing within today's clip the user wants to
@@ -113,91 +122,123 @@ export default function BaselineComparePage() {
   }, [todayObjectUrl])
 
   const processTodayVideo = async (file: File) => {
-    if (!file.type.startsWith('video/')) return
+    if (!file.type.startsWith('video/')) {
+      setUploadError('Please pick a video file (MP4, MOV, or WebM).')
+      return
+    }
+    if (uploadBusy) return
 
-    let frames: PoseFrame[] | null = null
-    let railwayBackend: ExtractorBackend | null = null
-    let railwayFailReason: string | null = null
+    setUploadBusy(true)
+    setUploadError(null)
+    setUploadStatus('Uploading video…')
 
-    // Railway path: upload the file to Vercel Blob first (Railway pulls
-    // from a URL, not a multipart body), then create a pending session
-    // row, then queue + poll. On any failure fall through silently to
-    // the browser MediaPipe path so the compare flow never dies on a
-    // bad day for the server.
-    if (USE_RAILWAY_EXTRACT) {
-      try {
-        const blobPath = `videos/${Date.now()}-${safeBlobFilename(file.name)}`
-        const blob = await upload(blobPath, file, {
-          access: 'public',
-          handleUploadUrl: '/api/upload',
-          contentType: file.type,
-        })
-        const sessRes = await fetch('/api/sessions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ blobUrl: blob.url, shotType: selectedBaseline?.shot_type ?? 'unknown' }),
-        })
-        if (sessRes.ok) {
+    try {
+      let frames: PoseFrame[] | null = null
+      let railwayBackend: ExtractorBackend | null = null
+      let railwayFailReason: string | null = null
+      // Track the blob URL across the Railway path so we don't need to
+      // re-upload on a fallback to the browser extractor.
+      let uploadedBlobUrl: string | null = null
+
+      if (USE_RAILWAY_EXTRACT) {
+        try {
+          const blobPath = `videos/${Date.now()}-${safeBlobFilename(file.name)}`
+          const blob = await upload(blobPath, file, {
+            access: 'public',
+            handleUploadUrl: '/api/upload',
+            contentType: file.type,
+          })
+          uploadedBlobUrl = blob.url
+          setUploadStatus('Creating session…')
+          const sessRes = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ blobUrl: blob.url, shotType: selectedBaseline?.shot_type ?? 'unknown' }),
+          })
+          if (!sessRes.ok) {
+            // Surface the underlying error so the user sees why
+            // (matches UploadZone's pattern).
+            let detail = ''
+            try {
+              const errBody = await sessRes.json()
+              detail = errBody?.detail || errBody?.error || ''
+            } catch {
+              try { detail = await sessRes.text() } catch { detail = '' }
+            }
+            throw new Error(
+              `create-pending failed: ${sessRes.status}${detail ? ` (${detail})` : ''}`,
+            )
+          }
           const { sessionId } = await sessRes.json()
+          setUploadStatus('Analyzing pose on the server…')
           const result = await extractPoseViaRailway({
             sessionId,
             blobUrl: blob.url,
           })
           frames = result.frames
           railwayBackend = result.extractorBackend
+        } catch (err) {
+          if (err instanceof RailwayExtractError) {
+            console.info(
+              '[baseline/compare] Railway path unavailable, falling back to browser:',
+              err.reason, err.message,
+            )
+            railwayFailReason =
+              err.message && err.message !== err.reason
+                ? `${err.reason}: ${err.message}`
+                : err.reason
+          } else {
+            console.error('[baseline/compare] Railway path errored, falling back to browser:', err)
+            railwayFailReason = err instanceof Error ? err.message : 'unknown'
+          }
+          frames = null
         }
-      } catch (err) {
-        if (err instanceof RailwayExtractError) {
-          console.info(
-            '[baseline/compare] Railway path unavailable, falling back to browser:',
-            err.reason, err.message,
-          )
-          // Concatenate reason + Error.message so the chip shows the
-          // category and the actual Railway error text. See UploadZone
-          // for the parallel implementation.
-          railwayFailReason =
-            err.message && err.message !== err.reason
-              ? `${err.reason}: ${err.message}`
-              : err.reason
-        } else {
-          console.error('[baseline/compare] Railway path errored, falling back to browser:', err)
-          railwayFailReason = err instanceof Error ? err.message : 'unknown'
-        }
-        frames = null
       }
-    }
 
-    // Railway-success fast path: skip the browser extractor entirely.
-    // The browser extractor (now onnxruntime-web RTMPose via
-    // lib/browserPose) is heavy to load and can hang on iPhone Safari
-    // if WASM init is slow — running it just to get an object URL is
-    // wasted work that turns "Railway worked" into "stuck upload."
-    // Mirrors the `usedRailway ? createObjectURL(file) : result.objectUrl`
-    // pattern in components/UploadZone.tsx.
-    if (frames && railwayBackend) {
+      // Railway-success fast path: skip the browser extractor entirely.
+      // The browser extractor (onnxruntime-web RTMPose via
+      // lib/browserPose) is heavy to load and can hang on iPhone Safari
+      // if WASM init is slow — running it just to get an object URL is
+      // wasted work that turns "Railway worked" into "stuck upload."
+      // Mirrors the `usedRailway ? createObjectURL(file) : result.objectUrl`
+      // pattern in components/UploadZone.tsx.
+      if (frames && railwayBackend) {
+        if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
+        setTodayObjectUrl(URL.createObjectURL(file))
+        setTodayFrames(frames)
+        setTodayExtractorBackend(railwayBackend)
+        setTodayFallbackReason(null)
+        setSelectedTodaySwing(null)
+        setUploadStatus('')
+        return
+      }
+
+      // Browser fallback (Railway disabled, errored, or returned empty).
+      setUploadStatus('Loading browser pose model…')
+      const localResult = await extract(file)
+      if (!localResult) {
+        setUploadError('Pose extraction failed. Try a clearer angle with your full body in frame.')
+        return
+      }
       if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
-      setTodayObjectUrl(URL.createObjectURL(file))
-      setTodayFrames(frames)
-      setTodayExtractorBackend(railwayBackend)
-      setTodayFallbackReason(null)
+      setTodayObjectUrl(localResult.objectUrl)
+      setTodayFrames(localResult.frames)
+      if (USE_RAILWAY_EXTRACT) {
+        setTodayExtractorBackend('rtmpose-browser-fallback')
+        setTodayFallbackReason(railwayFailReason)
+      } else {
+        setTodayExtractorBackend(localResult.extractorBackend)
+        setTodayFallbackReason(null)
+      }
       setSelectedTodaySwing(null)
-      return
+      void uploadedBlobUrl  // referenced via closure; satisfy lint
+    } catch (err) {
+      console.error('[baseline/compare] upload pipeline failed:', err)
+      setUploadError(err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setUploadBusy(false)
+      setUploadStatus('')
     }
-
-    // Browser fallback (Railway disabled, errored, or returned empty).
-    const localResult = await extract(file)
-    if (!localResult) return
-    if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
-    setTodayObjectUrl(localResult.objectUrl)
-    setTodayFrames(localResult.frames)
-    if (USE_RAILWAY_EXTRACT) {
-      setTodayExtractorBackend('rtmpose-browser-fallback')
-      setTodayFallbackReason(railwayFailReason)
-    } else {
-      setTodayExtractorBackend(localResult.extractorBackend)
-      setTodayFallbackReason(null)
-    }
-    setSelectedTodaySwing(null)
   }
 
   // When today's frames change (new upload), default to swing 1 if
@@ -284,7 +325,11 @@ export default function BaselineComparePage() {
             </div>
           )}
 
-          {/* Upload zone for today's swing */}
+          {/* Upload zone for today's swing. Use the local uploadBusy
+              state (covers the whole pipeline incl. Railway) instead of
+              the hook's isProcessing (browser-extractor only) — without
+              this the Railway path runs invisibly for 30-60s with no
+              progress UI and the user thinks the page is broken. */}
           {!hasToday && (
             <div
               onDragOver={(e) => {
@@ -293,12 +338,12 @@ export default function BaselineComparePage() {
               }}
               onDragLeave={() => setDragging(false)}
               onDrop={handleDrop}
-              onClick={() => !isProcessing && fileInputRef.current?.click()}
+              onClick={() => !uploadBusy && fileInputRef.current?.click()}
               className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all ${
                 dragging
                   ? 'border-emerald-400 bg-emerald-500/10'
                   : 'border-white/20 hover:border-white/40 hover:bg-white/5'
-              } ${isProcessing ? 'cursor-not-allowed opacity-80' : ''}`}
+              } ${uploadBusy ? 'cursor-not-allowed opacity-80' : ''}`}
             >
               <input
                 ref={fileInputRef}
@@ -308,15 +353,19 @@ export default function BaselineComparePage() {
                 onChange={(e) => {
                   const file = e.target.files?.[0]
                   if (file) processTodayVideo(file)
+                  // Reset so picking the same file twice still fires onChange.
+                  if (e.target) e.target.value = ''
                 }}
               />
-              {isProcessing ? (
+              {uploadBusy ? (
                 <div className="space-y-3">
-                  <p className="text-white">Processing today&apos;s swing... {progress}%</p>
+                  <p className="text-white">
+                    {uploadStatus || `Processing today's swing… ${progress}%`}
+                  </p>
                   <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
                     <div
                       className="h-full bg-emerald-400 rounded-full transition-all"
-                      style={{ width: `${progress}%` }}
+                      style={{ width: isProcessing ? `${progress}%` : '40%' }}
                     />
                   </div>
                 </div>
@@ -327,6 +376,11 @@ export default function BaselineComparePage() {
                   <p className="text-white/40 text-sm mt-1">MP4, MOV, WebM</p>
                 </div>
               )}
+            </div>
+          )}
+          {uploadError && (
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4">
+              <p className="text-red-300 text-sm">{uploadError}</p>
             </div>
           )}
 
