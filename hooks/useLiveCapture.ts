@@ -327,6 +327,11 @@ export function useLiveCapture(
             nowMs - lastDetectionAtRef.current >= NO_BODY_TIMEOUT_MS
           ) {
             emitQuality('no-body')
+          } else if (lastDetectionAtRef.current === 0) {
+            // First seconds of the session and MediaPipe is returning
+            // landmarks but at low confidence. Without this branch the
+            // pill stayed null forever — user saw no signal at all.
+            emitQuality('no-body')
           }
           return
         }
