@@ -4,9 +4,12 @@ import type { PoseFrame } from '@/lib/supabase'
 import type { ExtractResult, ExtractorBackend } from '@/lib/poseExtraction'
 
 // Poll interval (ms) for the session-status check. Extraction on Railway
-// runs server-side and typically finishes in 60-90s on a 1-2 minute clip.
-// 3s polls mean ~20-30 requests per extraction — negligible load.
-const POLL_INTERVAL_MS = 3000
+// is now ~10-20s after the speedup work, so a 3s poll meant up to 3s of
+// pointless wait between Railway finishing and the browser noticing.
+// 1s polls add negligible DB load (~10-20 SELECTs per extraction, the
+// Supabase row already exists) and shave ~1.5s off perceived latency
+// on average.
+const POLL_INTERVAL_MS = 1000
 
 // Hard client-side timeout (ms). If Railway doesn't report 'complete'
 // within this window, we give up and the caller falls back to browser

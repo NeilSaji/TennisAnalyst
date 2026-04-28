@@ -460,7 +460,14 @@ You will emit your response by calling the emit_coaching tool. Do not write pros
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: maxTokens,
-        system: primarySystemPrompt,
+        // Prompt caching: the system prompt is the same ~600-line voice-
+        // rules + tool-use scaffolding on every call. Marking it
+        // ephemeral lets Anthropic skip re-tokenizing it within a 5-min
+        // window — saves ~1-2s of TTFB on subsequent calls and gives a
+        // 90% input-token discount on the cached portion.
+        system: [
+          { type: 'text', text: primarySystemPrompt, cache_control: { type: 'ephemeral' } },
+        ],
         messages: [{ role: 'user', content: prompt }],
         // TODO: drop this cast once COACHING_TOOL_SCHEMAS types `input_schema`
         // as `Anthropic.Tool.InputSchema` instead of `Record<string, unknown>`.
@@ -503,7 +510,12 @@ You will emit your response by calling the emit_coaching tool. Do not write pros
     const messageStream = anthropic.messages.stream({
       model: 'claude-sonnet-4-6',
       max_tokens: maxTokens,
-      system: fallbackSystemPrompt,
+      // Same prompt-caching pattern as the structured path. fallback
+      // and primary use different system prompts so they cache as
+      // separate entries — each saves ~1-2s TTFB on cache hits.
+      system: [
+        { type: 'text', text: fallbackSystemPrompt, cache_control: { type: 'ephemeral' } },
+      ],
       messages: [{ role: 'user', content: prompt }],
     })
 
