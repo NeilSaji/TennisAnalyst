@@ -18,6 +18,7 @@ gaps.
 from __future__ import annotations
 
 import math
+from threading import RLock
 from typing import Optional
 
 import numpy as np
@@ -142,15 +143,25 @@ class PersonTracker:
         self.max_coast_frames = max_coast_frames
         self.iou_gate = iou_gate
         self.ema_alpha = ema_alpha
+        # The Railway extraction loop now submits multiple
+        # infer_pose_for_frame calls to a thread pool concurrently. Each
+        # call eventually hits self.update(); without a mutex two
+        # concurrent updates could race on _current_bbox / _last_*. The
+        # critical section is microseconds long (no I/O, no inference)
+        # so the lock has near-zero impact on overall throughput.
+        # RLock so the recursive call after a coast-driven reset() does
+        # not self-deadlock.
+        self._lock = RLock()
 
     @property
     def is_locked(self) -> bool:
         return self._current_bbox is not None
 
     def reset(self) -> None:
-        self._current_bbox = None
-        self._last_confidence = 0.0
-        self._frames_since_detection = 0
+        with self._lock:
+            self._current_bbox = None
+            self._last_confidence = 0.0
+            self._frames_since_detection = 0
 
     def update(
         self,
@@ -177,48 +188,50 @@ class PersonTracker:
         was provided. Once locked, always returns the current best
         estimate (real detection or coasted).
         """
-        if self._current_bbox is None:
-            # Cold start.
-            if not candidates:
-                return None
-            best = max(
-                candidates,
-                key=lambda c: _cold_start_score(c, img_w, img_h),
-            )
-            self._current_bbox = (best[0], best[1], best[2], best[3])
-            self._last_confidence = best[4]
-            self._frames_since_detection = 0
-            return best
-
-        # Warm path: associate by IoU against the current reference.
-        if candidates:
-            ious = [iou(self._current_bbox, (c[0], c[1], c[2], c[3])) for c in candidates]
-            best_idx = max(range(len(candidates)), key=lambda i: ious[i])
-            if ious[best_idx] >= self.iou_gate:
-                match = candidates[best_idx]
-                match_bbox: BBox = (match[0], match[1], match[2], match[3])
-                smoothed = _ema_update(self._current_bbox, match_bbox, self.ema_alpha)
-                self._current_bbox = smoothed
-                self._last_confidence = match[4]
-                self._frames_since_detection = 0
-                return (
-                    smoothed[0],
-                    smoothed[1],
-                    smoothed[2],
-                    smoothed[3],
-                    match[4],
+        with self._lock:
+            if self._current_bbox is None:
+                # Cold start.
+                if not candidates:
+                    return None
+                best = max(
+                    candidates,
+                    key=lambda c: _cold_start_score(c, img_w, img_h),
                 )
+                self._current_bbox = (best[0], best[1], best[2], best[3])
+                self._last_confidence = best[4]
+                self._frames_since_detection = 0
+                return best
 
-        # No detection associated: coast on the previous reference.
-        self._frames_since_detection += 1
-        if self._frames_since_detection > self.max_coast_frames:
-            self.reset()
-            # After reset, try cold start with whatever candidates we have
-            # so the next frame isn't strictly blank.
-            return self.update(candidates, img_w, img_h)
+            # Warm path: associate by IoU against the current reference.
+            if candidates:
+                ious = [iou(self._current_bbox, (c[0], c[1], c[2], c[3])) for c in candidates]
+                best_idx = max(range(len(candidates)), key=lambda i: ious[i])
+                if ious[best_idx] >= self.iou_gate:
+                    match = candidates[best_idx]
+                    match_bbox: BBox = (match[0], match[1], match[2], match[3])
+                    smoothed = _ema_update(self._current_bbox, match_bbox, self.ema_alpha)
+                    self._current_bbox = smoothed
+                    self._last_confidence = match[4]
+                    self._frames_since_detection = 0
+                    return (
+                        smoothed[0],
+                        smoothed[1],
+                        smoothed[2],
+                        smoothed[3],
+                        match[4],
+                    )
 
-        x1, y1, x2, y2 = self._current_bbox
-        return (x1, y1, x2, y2, self._last_confidence)
+            # No detection associated: coast on the previous reference.
+            self._frames_since_detection += 1
+            if self._frames_since_detection > self.max_coast_frames:
+                self.reset()
+                # After reset, try cold start with whatever candidates we have
+                # so the next frame isn't strictly blank. RLock allows the
+                # nested update + reset calls without self-deadlock.
+                return self.update(candidates, img_w, img_h)
+
+            x1, y1, x2, y2 = self._current_bbox
+            return (x1, y1, x2, y2, self._last_confidence)
 
 
 class RacketTracker:

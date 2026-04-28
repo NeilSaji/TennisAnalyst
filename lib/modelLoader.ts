@@ -119,9 +119,15 @@ async function doLoad(
     opts.onProgress?.(bytes.byteLength, total || bytes.byteLength)
     if (cache) {
       try {
+        // TS 5.7 tightened Uint8Array's generic to track its underlying
+        // buffer type. `bytes` is Uint8Array<ArrayBufferLike> (because
+        // arrayBuffer() returns ArrayBufferLike, not ArrayBuffer), and
+        // BodyInit only accepts Uint8Array<ArrayBuffer>. Pass the
+        // backing buffer directly — it's the right type and avoids an
+        // unnecessary copy.
         await cache.put(
           key,
-          new Response(bytes, { headers: response.headers }),
+          new Response(bytes.buffer as ArrayBuffer, { headers: response.headers }),
         )
       } catch {
         // ignore — see above
