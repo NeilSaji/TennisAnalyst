@@ -49,7 +49,14 @@ inference_image = (
         "onnxruntime-gpu>=1.18.0",
         "rtmlib==0.0.15",
         "fastapi==0.115.0",
-        "supabase==2.8.1",  # only because main.py imports it; we don't call it
+        # Both supabase and mediapipe are imported at module load by
+        # main.py (lines 18-19). We never CALL them on the Modal path
+        # (POSE_BACKEND=rtmpose routes around mediapipe; supabase write
+        # happens back on Railway), but the import has to resolve or
+        # `from main import extract_keypoints_from_video` raises
+        # ModuleNotFoundError before our code runs.
+        "supabase==2.8.1",
+        "mediapipe>=0.10.11",
     )
     # Mount the whole railway-service directory so we can reuse the
     # exact same `extract_keypoints_from_video` pipeline (including the
