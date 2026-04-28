@@ -314,13 +314,22 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
 
     let cancelled = false
     let sizedKey: string | null = null
-    // Streaming One Euro smoother for the rendered skeleton. Causal so
-    // it adds at most one frame of phase lag, but cancels the per-frame
-    // jitter that otherwise makes live joint dots look noisier than the
-    // post-hoc /analyze view (which gets filtfilt zero-phase smoothing).
+    // Streaming One Euro smoother for the rendered skeleton. Tuned for
+    // BODY motion (the defaults in poseSmoothing.ts are pen/mouse from
+    // Casiez 2012, which over-damp human-scale motion — beta=0.007 caps
+    // adaptive cutoff at ~1Hz no matter how fast the wrist moves, so
+    // fast swings barely register on the rendered skeleton). Body
+    // tracking values per the One Euro paper's tuning section:
+    //   minCutoff = 4Hz (lets fast joint motion through)
+    //   beta = 0.7 (aggressive speedup on velocity)
+    //   dcutoff = 1.0 (default for derivative smoothing)
     // Detector input is left raw — gates and swing detector see what
     // the model produced, only the on-screen skeleton is smoothed.
-    const renderSmoother = createStreamingLandmarkSmoother()
+    const renderSmoother = createStreamingLandmarkSmoother({
+      minCutoff: 4.0,
+      beta: 0.7,
+      dcutoff: 1.0,
+    })
     let lastRenderedFrameIndex = -1
 
     const draw = () => {
