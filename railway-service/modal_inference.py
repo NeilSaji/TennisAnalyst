@@ -116,10 +116,14 @@ def _is_url_allowed(url: str) -> bool:
     # long clip doesn't time out at the Modal layer before Railway
     # gives up.
     timeout=300,
-    # Scale-to-zero after 10 min idle. Keeps the GPU billing close to
-    # zero outside of active sessions; user pays cold-start tax once
-    # per quiet period.
-    scaledown_window=600,
+    # Scale to zero aggressively. Modal bills GPU for the entire
+    # idle window after a request, NOT just the active inference,
+    # so a 10-min window means every upload pays for 10 min of T4
+    # ($0.10/upload). 30s drops that to <$0.005/upload while still
+    # letting back-to-back uploads from the same session reuse a
+    # warm container. Cold-start tax goes up to ~5-10s on the next
+    # upload after a quiet minute, which is fine for our volume.
+    scaledown_window=30,
 )
 @modal.fastapi_endpoint(method="POST")
 def extract_pose(payload: dict):
