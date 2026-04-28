@@ -5,9 +5,11 @@ import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import JointTogglePanel from '@/components/JointTogglePanel'
+import SwingSelector from '@/components/SwingSelector'
 import { useBaselineStore } from '@/store/baseline'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
 import { useUser } from '@/hooks/useUser'
+import { detectSwings } from '@/lib/jointAngles'
 import type { PoseFrame, Baseline } from '@/lib/supabase'
 
 const ComparisonLayout = dynamic(() => import('@/components/ComparisonLayout'), { ssr: false })
@@ -24,6 +26,12 @@ export default function BaselineComparePage() {
   const [todayFrames, setTodayFrames] = useState<PoseFrame[]>([])
   const [dragging, setDragging] = useState(false)
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null)
+  // Index (1-based) of the swing within today's clip the user wants to
+  // compare against the baseline. Multi-swing clips would otherwise
+  // confuse phase detection — detectSwingPhases finds ONE peak across
+  // the whole video, so only one of N swings gets clean phase sync.
+  // Slicing to one swing at a time fixes that.
+  const [selectedTodaySwing, setSelectedTodaySwing] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Gate behind auth; load baselines once signed in.
@@ -48,6 +56,26 @@ export default function BaselineComparePage() {
 
   const baselineFrames = selectedBaseline?.keypoints_json?.frames ?? []
 
+  // Detect swings within today's uploaded clip. Multi-swing clips
+  // (e.g. "I just hit 12 forehands and uploaded the rally") get
+  // segmented so each swing can be compared independently.
+  const todaySwings = useMemo(() => detectSwings(todayFrames), [todayFrames])
+  const hasMultipleTodaySwings = todaySwings.length > 1
+
+  // The frames actually fed into ComparisonLayout / MetricsComparison /
+  // the LLM. When the user picks a specific swing, slice to it. When
+  // there's only one swing, use the whole clip (detectSwings returns
+  // the whole array as a single segment in that case anyway). Slicing
+  // is what lets phase sync work on every swing the user picks: phases
+  // re-detect cleanly on a 30-frame slice in a way they cannot on a
+  // 3000-frame multi-swing rally.
+  const todayFramesForCompare = useMemo<PoseFrame[]>(() => {
+    if (selectedTodaySwing != null && todaySwings[selectedTodaySwing - 1]) {
+      return todaySwings[selectedTodaySwing - 1].frames
+    }
+    return todayFrames
+  }, [selectedTodaySwing, todaySwings, todayFrames])
+
   // Clean up any object URL on unmount / replacement
   useEffect(() => {
     return () => {
@@ -63,7 +91,22 @@ export default function BaselineComparePage() {
     if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
     setTodayObjectUrl(result.objectUrl)
     setTodayFrames(result.frames)
+    // Reset the per-swing selection on a new upload so the previous
+    // clip's selection doesn't leak into a clip that may not have
+    // that many swings.
+    setSelectedTodaySwing(null)
   }
+
+  // When today's frames change (new upload), default to swing 1 if
+  // there are multiple swings so phase sync engages immediately
+  // instead of waiting for the user to discover the selector.
+  useEffect(() => {
+    if (todaySwings.length > 1 && selectedTodaySwing === null) {
+      setSelectedTodaySwing(1)
+    } else if (todaySwings.length <= 1 && selectedTodaySwing !== null) {
+      setSelectedTodaySwing(null)
+    }
+  }, [todaySwings.length, selectedTodaySwing])
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
@@ -204,11 +247,20 @@ export default function BaselineComparePage() {
                   Upload different video
                 </button>
               </div>
+              {hasMultipleTodaySwings && (
+                <div className="px-3 pt-3">
+                  <SwingSelector
+                    allFrames={todayFrames}
+                    selectedIndex={selectedTodaySwing}
+                    onSelect={(seg) => setSelectedTodaySwing(seg.index)}
+                  />
+                </div>
+              )}
               <div className="p-3">
                 <ComparisonLayout
                   userBlobUrl={selectedBaseline.blob_url}
                   userFrames={baselineFrames}
-                  proFrames={todayFrames}
+                  proFrames={todayFramesForCompare}
                   proVideoUrl={todayObjectUrl ?? ''}
                   userName="Baseline"
                   proName="Today"
@@ -220,7 +272,7 @@ export default function BaselineComparePage() {
           {canCompare && (
             <MetricsComparison
               userFrames={baselineFrames}
-              proFrames={todayFrames}
+              proFrames={todayFramesForCompare}
               shotType={selectedBaseline?.shot_type ?? null}
               userLabel="Baseline"
               proLabel="Today"
@@ -231,7 +283,7 @@ export default function BaselineComparePage() {
             <LLMCoachingPanel
               compareMode="baseline"
               frames={baselineFrames}
-              compareFrames={todayFrames}
+              compareFrames={todayFramesForCompare}
               baselineLabel={selectedBaseline.label}
             />
           )}
