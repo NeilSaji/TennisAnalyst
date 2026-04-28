@@ -88,6 +88,99 @@ export function isFrameConfident(
 }
 
 // ---------------------------------------------------------------------------
+// Body-presence gate
+// ---------------------------------------------------------------------------
+
+// MediaPipe Pose landmark indices used by the body-presence gate. We
+// duplicate them here rather than importing LANDMARK_INDICES to keep
+// poseSmoothing.ts free of cross-module deps that would create cycles
+// (jointAngles.ts already pulls from this file's neighbors).
+const BODY_LEFT_SHOULDER = 11
+const BODY_RIGHT_SHOULDER = 12
+const BODY_LEFT_WRIST = 15
+const BODY_RIGHT_WRIST = 16
+const BODY_LEFT_HIP = 23
+const BODY_RIGHT_HIP = 24
+
+/** Default per-landmark visibility floor for the strict body-presence gate. */
+const DEFAULT_BODY_VISIBILITY = 0.5
+/**
+ * Default minimum vertical extent (max-y minus min-y, normalized [0,1])
+ * across the required landmarks. 0.35 rejects "head + shoulders only"
+ * crops where the player's torso/legs aren't actually in frame.
+ */
+const DEFAULT_MIN_VERTICAL_EXTENT = 0.35
+
+export interface BodyVisibilityOptions {
+  /** Per-landmark visibility floor. Default 0.5. */
+  visibilityFloor?: number
+  /** Min vertical extent of the required landmarks. Default 0.35. */
+  minVerticalExtent?: number
+}
+
+/**
+ * Strict body-presence gate. Returns true only when both shoulders, both
+ * hips, AND at least one wrist are visible at >= visibilityFloor AND the
+ * vertical extent across those required landmarks is at least
+ * minVerticalExtent.
+ *
+ * Sits next to (not in place of) `isFrameConfident`, which gates on the
+ * average visibility of all 33 landmarks. The face has 11 stable points
+ * that drag the average above 0.4 even when hips/legs are at 0.1, so a
+ * face-only frame can pass `isFrameConfident`. We use this stricter gate
+ * to decide whether a frame is allowed to drive the live swing detector.
+ */
+export function isBodyVisible(
+  landmarks: Landmark[],
+  opts: BodyVisibilityOptions = {},
+): boolean {
+  const {
+    visibilityFloor = DEFAULT_BODY_VISIBILITY,
+    minVerticalExtent = DEFAULT_MIN_VERTICAL_EXTENT,
+  } = opts
+
+  if (landmarks.length === 0) return false
+
+  const byId = new Map<number, Landmark>()
+  for (const lm of landmarks) byId.set(lm.id, lm)
+
+  const lShoulder = byId.get(BODY_LEFT_SHOULDER)
+  const rShoulder = byId.get(BODY_RIGHT_SHOULDER)
+  const lHip = byId.get(BODY_LEFT_HIP)
+  const rHip = byId.get(BODY_RIGHT_HIP)
+  const lWrist = byId.get(BODY_LEFT_WRIST)
+  const rWrist = byId.get(BODY_RIGHT_WRIST)
+
+  // Both shoulders + both hips required.
+  if (!lShoulder || lShoulder.visibility < visibilityFloor) return false
+  if (!rShoulder || rShoulder.visibility < visibilityFloor) return false
+  if (!lHip || lHip.visibility < visibilityFloor) return false
+  if (!rHip || rHip.visibility < visibilityFloor) return false
+
+  // At least one wrist required.
+  const lWristOk = !!lWrist && lWrist.visibility >= visibilityFloor
+  const rWristOk = !!rWrist && rWrist.visibility >= visibilityFloor
+  if (!lWristOk && !rWristOk) return false
+
+  // Vertical extent over the required landmarks. Only count the wrist(s)
+  // that actually cleared the visibility floor — a hidden wrist contributes
+  // no spatial information.
+  const ys: number[] = [lShoulder.y, rShoulder.y, lHip.y, rHip.y]
+  if (lWristOk) ys.push(lWrist!.y)
+  if (rWristOk) ys.push(rWrist!.y)
+
+  let minY = Infinity
+  let maxY = -Infinity
+  for (const y of ys) {
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+  }
+  if (maxY - minY < minVerticalExtent) return false
+
+  return true
+}
+
+// ---------------------------------------------------------------------------
 // One Euro Filter
 // ---------------------------------------------------------------------------
 
