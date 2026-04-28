@@ -693,13 +693,16 @@ async def extract_pose(
 
 
 MODAL_INFERENCE_URL = os.environ.get("MODAL_INFERENCE_URL", "").strip()
-MODAL_INFERENCE_KEY = os.environ.get("MODAL_INFERENCE_KEY", "").strip()
 
 
 async def _extract_via_modal(video_url: str, sample_fps: int = 30) -> dict:
     """Forward the video URL to a Modal GPU endpoint and return its
     keypoints_json response. Same shape as extract_keypoints_from_video
     so the rest of _run_extraction is agnostic to which path ran.
+
+    No shared bearer token: the Modal endpoint enforces an HTTPS+domain
+    allowlist on the video_url field instead. The Modal URL itself is
+    server-to-server only (Railway → Modal), never sent to the browser.
 
     Raises on transport failure or non-2xx so the outer try/except in
     _run_extraction can mark the session as errored just like for the
@@ -709,7 +712,6 @@ async def _extract_via_modal(video_url: str, sample_fps: int = 30) -> dict:
         resp = await client.post(
             MODAL_INFERENCE_URL,
             json={"video_url": video_url, "sample_fps": sample_fps},
-            headers={"Authorization": f"Bearer {MODAL_INFERENCE_KEY}"},
         )
         resp.raise_for_status()
         return resp.json()
@@ -724,7 +726,7 @@ async def _run_extraction(req: ExtractRequest):
         # the same extract_keypoints_from_video pipeline on T4. Falls
         # through to local extraction on any Modal failure so a Modal
         # outage doesn't break uploads.
-        if MODAL_INFERENCE_URL and MODAL_INFERENCE_KEY:
+        if MODAL_INFERENCE_URL:
             try:
                 keypoints_json = await _extract_via_modal(req.video_url)
                 tmp_path = None  # skipped; Modal owns the temp file
