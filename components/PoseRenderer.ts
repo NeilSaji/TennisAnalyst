@@ -82,13 +82,26 @@ export function renderPose(
     })
   }
 
+  // Compute a player-size scale factor so joint dots, bone widths, and
+  // angle badges shrink proportionally when the subject is small in the
+  // frame. Without this, a player who's 25% of the canvas height gets
+  // joint dots that visually swamp them — the hardcoded 8/6/2 px radii
+  // assume a player filling the canvas.
+  //
+  // Heuristic: bbox height of visible landmarks / canvas height. Capped
+  // at [0.4, 1.0] so very small players still show readable dots and
+  // very large players don't get oversized ones.
+  const playerScale = computePlayerScale(pixelMap, canvasHeight)
+  const dotOuterR = Math.max(3, 8 * playerScale)
+  const dotColorR = Math.max(2.5, 6 * playerScale)
+  const dotCenterR = Math.max(1, 2 * playerScale)
+  const boneWidth = Math.max(1.5, 3 * playerScale)
+
   // Draw skeleton bones with halo (dark outline first, then colored stroke
   // on top). Makes bones readable on both bright and dark backgrounds.
   if (showSkeleton) {
     ctx.save()
-    // Bumped 2 → 3 to match the zoomed render path and close the
-    // "skeleton too thin at standard view" complaint.
-    const baseWidth = 3
+    const baseWidth = boneWidth
     const strokeColor = skeletonColor ?? 'rgba(255,255,255,0.75)'
 
     for (const [fromId, toId] of SKELETON_CONNECTIONS) {
@@ -130,27 +143,59 @@ export function renderPose(
       const pos = pixelMap.get(id)
       if (!pos) continue
 
-      // Outer ring
+      // Outer ring (dark halo for legibility on bright backgrounds)
       ctx.beginPath()
-      ctx.arc(pos.x, pos.y, 8, 0, Math.PI * 2)
+      ctx.arc(pos.x, pos.y, dotOuterR, 0, Math.PI * 2)
       ctx.fillStyle = 'rgba(0,0,0,0.5)'
       ctx.fill()
 
       // Colored dot
       ctx.beginPath()
-      ctx.arc(pos.x, pos.y, 6, 0, Math.PI * 2)
+      ctx.arc(pos.x, pos.y, dotColorR, 0, Math.PI * 2)
       ctx.fillStyle = dotColor
       ctx.fill()
 
-      // White center
+      // White center for contrast
       ctx.beginPath()
-      ctx.arc(pos.x, pos.y, 2, 0, Math.PI * 2)
+      ctx.arc(pos.x, pos.y, dotCenterR, 0, Math.PI * 2)
       ctx.fillStyle = 'white'
       ctx.fill()
     }
     ctx.globalAlpha = 1
     ctx.restore()
   }
+}
+
+/**
+ * Derive a 0.4–1.0 scale factor from how much canvas height the player
+ * actually occupies. Used to size joint dots, bone strokes, and the
+ * angle-label pills so they stay proportional on small-in-frame
+ * subjects (e.g., a wide-court shot where the player is ~25% of the
+ * frame). The 0.4 floor keeps dots visible on tiny subjects; the 1.0
+ * ceiling preserves the default visual size when the player fills the
+ * frame.
+ *
+ * Returns 1.0 when there's no usable bbox (sparse landmarks, unusual
+ * pose) — equivalent to the legacy fixed-size behavior.
+ */
+function computePlayerScale(
+  pixelMap: Map<number, { x: number; y: number }>,
+  canvasHeight: number,
+): number {
+  if (pixelMap.size < 4 || canvasHeight <= 0) return 1
+  let minY = Infinity
+  let maxY = -Infinity
+  for (const { y } of pixelMap.values()) {
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+  }
+  const bboxH = maxY - minY
+  if (bboxH <= 0) return 1
+  // Linear scale based on player-height-fraction. A player filling the
+  // canvas (fraction=1) gets scale=1. A player at 25% height gets
+  // scale=0.55, which roughly halves dot area.
+  const fraction = Math.max(0, Math.min(1, bboxH / canvasHeight))
+  return Math.max(0.4, Math.min(1, 0.4 + fraction * 0.6))
 }
 
 // Compute the bounding box of visible landmarks in normalized [0,1] space.
@@ -359,9 +404,31 @@ export function renderAngleLabels(
   const config = shotType ? SHOT_TYPE_CONFIGS[shotType] : null
   const canBenchmark = !!(config && phase)
 
+  // Player-size scale (matches renderPose). Without this, badges visibly
+  // swamp small-in-frame players. Computed once per render call from
+  // the same visible-landmark bbox as the joint dots.
+  const renderableLandmarks = new Map<number, { x: number; y: number }>()
+  for (const lm of frame.landmarks) {
+    if (lm.visibility < VISIBILITY_CUTOFF) continue
+    renderableLandmarks.set(lm.id, {
+      x: lm.x * canvasWidth,
+      y: lm.y * canvasHeight,
+    })
+  }
+  const playerScale = computePlayerScale(renderableLandmarks, canvasHeight)
+  // Font + pill scale separately from radius scale because text below
+  // ~9px gets hard to read on phone screens — clamp at a minimum that
+  // stays readable even when the player is tiny.
+  const fontPx = Math.max(10, Math.round(14 * playerScale))
+  const deltaFontPx = Math.max(9, Math.round(11 * playerScale))
+  const pillH = Math.max(14, Math.round(20 * playerScale))
+  const pillH2 = Math.max(22, Math.round(32 * playerScale))
+  const padX = Math.max(4, Math.round(6 * playerScale))
+  const offset = Math.max(10, Math.round(16 * playerScale))
+
   ctx.save()
   ctx.globalAlpha = 0.95 * scale
-  ctx.font = '600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+  ctx.font = `600 ${fontPx}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`
   ctx.textBaseline = 'middle'
 
   for (const { key, anchor, side } of ANGLE_LABELS) {
@@ -399,25 +466,24 @@ export function renderAngleLabels(
         ? `${Math.round(delta)}° off`
         : null
 
-    const padX = 6
-    const padY = 3
     // Pill geometry: two-line badges are taller. Width = widest of the
-    // two lines + padding.
+    // two lines + padding. All dimensions scale with playerScale so a
+    // far-away player gets smaller pills.
     const primaryW = ctx.measureText(primary).width
     ctx.save()
-    ctx.font = '500 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    ctx.font = `500 ${deltaFontPx}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`
     const deltaW = deltaText ? ctx.measureText(deltaText).width : 0
     ctx.restore()
+    const currentPillH = deltaText ? pillH2 : pillH
     const pillW = Math.max(primaryW, deltaW) + padX * 2
-    const pillH = deltaText ? 32 : 20
 
-    const offsetX = side === 'right' ? 16 : -16 - pillW
+    const offsetX = side === 'right' ? offset : -offset - pillW
     const pillX = px + offsetX
-    const pillY = py - pillH / 2
+    const pillY = py - currentPillH / 2
 
     // Dark pill background for legibility over any video.
     ctx.fillStyle = 'rgba(0,0,0,0.75)'
-    roundRect(ctx, pillX, pillY, pillW, pillH, 4)
+    roundRect(ctx, pillX, pillY, pillW, currentPillH, 4)
     ctx.fill()
 
     // Border: neutral faint white when not benchmarking, colored when we
@@ -426,22 +492,23 @@ export function renderAngleLabels(
     const borderColor = canBenchmark ? BENCHMARK_COLORS[level] : 'rgba(255,255,255,0.25)'
     ctx.strokeStyle = borderColor
     ctx.lineWidth = canBenchmark && level !== 'unknown' ? 2 : 1
-    roundRect(ctx, pillX, pillY, pillW, pillH, 4)
+    roundRect(ctx, pillX, pillY, pillW, currentPillH, 4)
     ctx.stroke()
 
     ctx.fillStyle = 'white'
     ctx.textAlign = 'left'
-    // Primary degree text
-    const primaryY = deltaText ? pillY + 11 : pillY + pillH / 2
+    // Primary degree text. On the two-line badge the primary sits in
+    // the upper third; on the single-line badge it's vertically centered.
+    const primaryY = deltaText ? pillY + currentPillH * 0.35 : pillY + currentPillH / 2
     ctx.fillText(primary, pillX + padX, primaryY)
 
     if (deltaText) {
       // Secondary "+Xº off" text in the benchmark color so the deviation
       // reads at a glance without having to see the border.
       ctx.save()
-      ctx.font = '500 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+      ctx.font = `500 ${deltaFontPx}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`
       ctx.fillStyle = BENCHMARK_COLORS[level]
-      ctx.fillText(deltaText, pillX + padX, pillY + 23)
+      ctx.fillText(deltaText, pillX + padX, pillY + currentPillH * 0.72)
       ctx.restore()
     }
   }
