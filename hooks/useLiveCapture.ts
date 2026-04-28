@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from 'react'
 import { getPoseLandmarker, getMonotonicTimestamp } from '@/lib/mediapipe'
 import { computeJointAngles } from '@/lib/jointAngles'
 import { isBodyVisible, isFrameConfident, smoothFrames } from '@/lib/poseSmoothing'
+import { classifyCameraAngle } from '@/lib/cameraAngle'
 import { LiveSwingDetector, type StreamedSwing } from '@/lib/liveSwingDetector'
 import type { PoseFrame, Landmark, KeypointsJson } from '@/lib/supabase'
 
@@ -23,7 +24,7 @@ export type LiveSessionResult = {
   durationMs: number
 }
 
-export type PoseQuality = 'good' | 'weak' | 'no-body'
+export type PoseQuality = 'good' | 'weak' | 'no-body' | 'wrong-angle'
 
 export interface UseLiveCaptureOptions {
   onSwing?: (swing: StreamedSwing) => void
@@ -33,15 +34,19 @@ export interface UseLiveCaptureOptions {
   targetDetectionFps?: number
   /**
    * Fired only on transitions between pose-quality states (not per-frame).
-   * 'good' = frame passed the strict body-presence gate (`isBodyVisible`).
+   * 'good' = frame passed the strict body-presence gate (`isBodyVisible`)
+   *          AND the camera-angle classifier returned 'side-on' or 'oblique'.
    * 'weak' = frame passed `isFrameConfident` but not `isBodyVisible` —
    *          the player is only partially in frame (face-only, legs cut).
+   * 'wrong-angle' = body is visible, but the camera angle is 'front-on' or
+   *          'unknown' — the swing-mechanics signal we grade off doesn't
+   *          project usefully into 2D, so we suppress detector input.
    * 'no-body' = no usable detection in the last ~1s.
    *
-   * Phase 1 only: callers are expected to set up the wiring; the UI pill
-   * that consumes this lives in Phase 3. Detector behavior already does
-   * the right thing without a UI consumer (face-only frames are excluded
-   * from the detector).
+   * Phase 1/1.5 only: callers are expected to set up the wiring; the UI
+   * pill that consumes this lives in Phase 3. Detector behavior already
+   * does the right thing without a UI consumer (face-only and wrong-angle
+   * frames are excluded from the detector).
    */
   onPoseQuality?: (q: PoseQuality) => void
 }
@@ -337,6 +342,18 @@ export function useLiveCapture(
           // (face-only, legs cut off, subject too small). Don't feed the
           // detector — that would let face-only fidget become a swing.
           emitQuality('weak')
+          return
+        }
+
+        // Phase 1.5: camera-angle gate. Body is in frame, but if the
+        // camera is square-on (or we can't tell), the swing mechanics we
+        // grade off collapse into the depth axis where MediaPipe's z is
+        // noise. Treat this exactly like a weak frame: keep the frame in
+        // framesRef so /analyze still has it, but don't feed the live
+        // detector and don't count it toward warmup.
+        const cameraAngle = classifyCameraAngle(landmarks)
+        if (cameraAngle === 'front-on' || cameraAngle === 'unknown') {
+          emitQuality('wrong-angle')
           return
         }
 
