@@ -49,6 +49,14 @@ export interface UseLiveCaptureOptions {
    * frames are excluded from the detector).
    */
   onPoseQuality?: (q: PoseQuality) => void
+  /**
+   * Fires once per detection-tick that survives the body-presence gate
+   * (the same frames that drive the swing detector). Phase 3 wires this
+   * into the on-screen skeleton overlay — the consumer is expected to
+   * stash the latest frame in a ref and draw it from a single rAF loop
+   * rather than re-rendering React state at 15fps.
+   */
+  onPoseFrame?: (frame: PoseFrame) => void
 }
 
 export interface UseLiveCaptureReturn {
@@ -102,7 +110,7 @@ const NO_BODY_TIMEOUT_MS = 1000
 export function useLiveCapture(
   options: UseLiveCaptureOptions = {},
 ): UseLiveCaptureReturn {
-  const { onSwing, onStatus, onPoseQuality, targetDetectionFps = 15 } = options
+  const { onSwing, onStatus, onPoseQuality, onPoseFrame, targetDetectionFps = 15 } = options
 
   const [status, setStatusState] = useState<LiveCaptureStatus>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -359,6 +367,11 @@ export function useLiveCapture(
 
         emitQuality('good')
 
+        // Hand the latest body-visible frame to the overlay layer (rAF
+        // loop in LiveCapturePanel reads it from a ref). Fired only on
+        // good frames so the skeleton never draws over a partial body.
+        onPoseFrame?.(frame)
+
         const emitted = detectorRef.current?.feed(frame) ?? null
         if (emitted) {
           swingsRef.current.push(emitted)
@@ -390,7 +403,7 @@ export function useLiveCapture(
     }
 
     setStatus('recording')
-  }, [cleanup, onSwing, onPoseQuality, setStatus, targetDetectionFps])
+  }, [cleanup, onSwing, onPoseQuality, onPoseFrame, setStatus, targetDetectionFps])
 
   const stop = useCallback(async (): Promise<LiveSessionResult | null> => {
     const generation = generationRef.current

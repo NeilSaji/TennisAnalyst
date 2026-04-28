@@ -10,7 +10,18 @@ function formatSessionMs(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
-export default function LiveCoachingTranscript() {
+interface LiveCoachingTranscriptProps {
+  // True while a coach request is awaiting a response. Drives the header
+  // "Listening to your last few swings…" pulse. When omitted, falls back
+  // to the live store's coachRequestInFlight flag — that's the wiring
+  // path used by the live page where LiveCapturePanel mirrors its
+  // useLiveCoach instance into the store.
+  isRequestInFlight?: boolean
+}
+
+export default function LiveCoachingTranscript({
+  isRequestInFlight,
+}: LiveCoachingTranscriptProps = {}) {
   const transcript = useLiveStore((s) => s.transcript)
   const ttsEnabled = useLiveStore((s) => s.ttsEnabled)
   const setTtsEnabled = useLiveStore((s) => s.setTtsEnabled)
@@ -20,6 +31,8 @@ export default function LiveCoachingTranscript() {
   // deliberate silence — so a clean drill that gets silence-as-cue won't
   // hold the banner up indefinitely.
   const coachingError = useLiveStore((s) => s.coachingError)
+  const coachRequestInFlightStore = useLiveStore((s) => s.coachRequestInFlight)
+  const inFlight = isRequestInFlight ?? coachRequestInFlightStore
   const listRef = useRef<HTMLUListElement | null>(null)
 
   useEffect(() => {
@@ -33,9 +46,24 @@ export default function LiveCoachingTranscript() {
       <header className="flex items-center justify-between px-4 py-3 border-b border-white/5">
         <div>
           <h2 className="text-white font-medium text-sm">Live coaching</h2>
-          <p className="text-white/40 text-xs">
-            {ttsAvailable ? 'Spoken through your earbuds, batched every few swings.' : 'Audio coaching is not available in this browser — transcript only.'}
-          </p>
+          {inFlight ? (
+            <p
+              data-testid="coach-thinking-indicator"
+              role="status"
+              aria-live="polite"
+              className="text-emerald-300/80 text-xs flex items-center gap-1.5 animate-pulse"
+            >
+              <span
+                aria-hidden
+                className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400"
+              />
+              Listening to your last few swings…
+            </p>
+          ) : (
+            <p className="text-white/40 text-xs">
+              {ttsAvailable ? 'Spoken through your earbuds, batched every few swings.' : 'Audio coaching is not available in this browser — transcript only.'}
+            </p>
+          )}
         </div>
         {ttsAvailable ? (
           <button
