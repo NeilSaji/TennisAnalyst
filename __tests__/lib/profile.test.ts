@@ -161,10 +161,10 @@ describe('TIER_MAX_TOKENS', () => {
     // Bumped after adding per-cue exercises (1-2 drills each) — the
     // previous ceiling truncated 3-cue responses mid-sentence. See
     // lib/profile.ts:TIER_MAX_TOKENS for the rationale.
-    expect(TIER_MAX_TOKENS.advanced).toBe(350)
-    expect(TIER_MAX_TOKENS.beginner).toBe(750)
-    expect(TIER_MAX_TOKENS.intermediate).toBe(1000)
-    expect(TIER_MAX_TOKENS.competitive).toBe(1300)
+    expect(TIER_MAX_TOKENS.advanced).toBe(400)
+    expect(TIER_MAX_TOKENS.beginner).toBe(900)
+    expect(TIER_MAX_TOKENS.intermediate).toBe(1200)
+    expect(TIER_MAX_TOKENS.competitive).toBe(1500)
     expect(TIER_MAX_TOKENS.advanced).toBeLessThan(TIER_MAX_TOKENS.beginner)
     expect(TIER_MAX_TOKENS.beginner).toBeLessThan(TIER_MAX_TOKENS.intermediate)
     expect(TIER_MAX_TOKENS.intermediate).toBeLessThan(TIER_MAX_TOKENS.competitive)
