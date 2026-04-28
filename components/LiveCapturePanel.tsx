@@ -158,6 +158,16 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   // Triggers the swing-counter scale bump. Toggles 0/1 each onSwing so
   // we always re-run the keyframe transition even on back-to-back hits.
   const [counterPulseTick, setCounterPulseTick] = useState<number>(0)
+  // Debug pipeline stats — refreshed every ~500ms while recording so
+  // the user can see WHY the tracking pill is whatever it is. Lifted
+  // out of the rAF loop to avoid 60Hz state churn.
+  const [debugStats, setDebugStats] = useState<{
+    yoloDetections: number
+    yoloTopScore: number
+    kpMaxConf: number
+    inferenceMs: number
+    provider: string | null
+  } | null>(null)
   // Pre-start camera selection. Default: back camera ('environment') —
   // the canonical "prop your phone side-on" tennis setup. Users testing
   // the feature on a phone often want selfie mode to see themselves;
@@ -244,7 +254,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     coach.setShotType(shotType)
   }, [coach, shotType])
 
-  const { start, stop, abort, status: captureStatus, error: captureError, isRecording, pickedMimeType, facingMode } = useLiveCapture({
+  const { start, stop, abort, status: captureStatus, error: captureError, isRecording, pickedMimeType, facingMode, getLastDetectStats } = useLiveCapture({
     onSwing: (swing) => {
       swingCountRef.current++
       setSwingCount(swingCountRef.current)
@@ -484,6 +494,31 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   useEffect(() => {
     isRecordingRef.current = isRecording
   }, [isRecording])
+
+  // Poll the ONNX pipeline stats while recording. Decouples from the
+  // 60Hz rAF render loop — 500ms is fast enough to feel live and slow
+  // enough not to thrash React state.
+  useEffect(() => {
+    if (!isRecording) {
+      setDebugStats(null)
+      return
+    }
+    const tick = () => {
+      const s = getLastDetectStats()
+      if (s) {
+        setDebugStats({
+          yoloDetections: s.yoloDetections,
+          yoloTopScore: s.yoloTopScore,
+          kpMaxConf: s.kpMaxConf,
+          inferenceMs: s.inferenceMs,
+          provider: s.provider,
+        })
+      }
+    }
+    tick()
+    const id = window.setInterval(tick, 500)
+    return () => window.clearInterval(id)
+  }, [isRecording, getLastDetectStats])
 
   // Run the upload + save pipeline against an already-finalized recording.
   // Pulled out of handleStop so the Retry button (after a failure) and the
@@ -847,6 +882,31 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
                 </div>
               )
             })()}
+
+            {/*
+              Diagnostic pill — shows ONNX pipeline state in real time.
+              Y = YOLO person detections + top score; KP = max keypoint
+              confidence from RTMPose; ms = total inference latency.
+              Useful when "Move into frame" fires unexpectedly:
+                Y:0 → YOLO didn't see a person (model load? threshold?)
+                Y:1 0.20 → barely detected, scrunched at edge
+                Y:1 0.85 KP:0 → YOLO ok, RTMPose silent (output map)
+                Y:1 0.85 KP:0.95 → pipeline fine, gate downstream
+            */}
+            {debugStats ? (
+              <div
+                data-testid="onnx-debug-pill"
+                className="inline-flex items-center gap-1 rounded-md bg-black/70 backdrop-blur px-2 py-1 text-[10px] font-mono text-white/70"
+              >
+                <span>Y:{debugStats.yoloDetections}</span>
+                <span>{debugStats.yoloTopScore.toFixed(2)}</span>
+                <span>·</span>
+                <span>KP:{debugStats.kpMaxConf.toFixed(2)}</span>
+                <span>·</span>
+                <span>{debugStats.inferenceMs}ms</span>
+                {debugStats.provider ? <span>· {debugStats.provider}</span> : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>

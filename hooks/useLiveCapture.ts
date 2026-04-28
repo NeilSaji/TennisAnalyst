@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useRef, useState } from 'react'
-import { createPoseDetector, type PoseDetector } from '@/lib/browserPose'
+import { createPoseDetector, type PoseDetector, type PoseDetectStats } from '@/lib/browserPose'
 import { computeJointAngles } from '@/lib/jointAngles'
 import { isBodyVisible, isFrameConfident, smoothFrames } from '@/lib/poseSmoothing'
 import { classifyCameraAngle } from '@/lib/cameraAngle'
@@ -107,6 +107,12 @@ export interface UseLiveCaptureReturn {
    * Null while no session is running.
    */
   facingMode: 'user' | 'environment' | null
+  /**
+   * Snapshot of the most recent ONNX pipeline call's diagnostics —
+   * used by the live UI to surface a debug pill without DevTools.
+   * Returns null when no detector exists yet (pre-start).
+   */
+  getLastDetectStats: () => PoseDetectStats | null
 }
 
 // Prefer mp4 (iOS native), fall back to webm variants (Chrome/Android).
@@ -589,5 +595,6 @@ export function useLiveCapture(
     isRecording: status === 'recording',
     pickedMimeType,
     facingMode,
+    getLastDetectStats: () => poseDetectorRef.current?.getLastStats() ?? null,
   }
 }

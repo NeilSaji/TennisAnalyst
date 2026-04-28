@@ -86,6 +86,22 @@ export interface CreatePoseDetectorOptions {
   rtmposeCacheKey?: string
 }
 
+/**
+ * Per-call pipeline diagnostics — populated on every `detect()` invocation
+ * so a live UI can surface where detection failed without DevTools.
+ * Useful when "Move into frame" fires unexpectedly: yoloDetections=0 means
+ * YOLO didn't see anyone, kpMaxConf=0 means RTMPose didn't run, etc.
+ */
+export interface PoseDetectStats {
+  yoloDetections: number
+  yoloTopScore: number
+  kpCount: number
+  kpMaxConf: number
+  inferenceMs: number
+  /** Provider that actually ran (webgpu / webgl / wasm). */
+  provider: ExecutionProvider | null
+}
+
 export interface PoseDetector {
   /**
    * Run the pipeline on a single frame source. Returns a 33-entry
@@ -95,6 +111,8 @@ export interface PoseDetector {
   detect(
     source: HTMLCanvasElement | OffscreenCanvas | HTMLVideoElement,
   ): Promise<Landmark[] | null>
+  /** Snapshot of the most recent detect() call's diagnostics. */
+  getLastStats(): PoseDetectStats
   /** Release the underlying ONNX sessions and clear cached buffers. */
   dispose(): void
 }
@@ -105,7 +123,13 @@ export interface PoseDetector {
 
 const YOLO_INPUT_SIZE = 640
 const YOLO_PERSON_CLASS_ID = 0
-const YOLO_PERSON_CONF_THRESHOLD = 0.3
+// Lowered from 0.3 -> 0.15 after live testing where the "Move into
+// frame" pill kept firing despite the user being clearly in frame.
+// On portrait phone aspect with the player at a court-back distance,
+// YOLO's letterboxed input shows the player at ~10-20% of the 640px
+// frame, which produces person-class scores in the 0.15-0.25 range.
+// 0.15 catches those without picking up phantom non-person blobs.
+const YOLO_PERSON_CONF_THRESHOLD = 0.15
 const YOLO_NMS_IOU_THRESHOLD = 0.45
 const YOLO_NUM_CLASSES = 80
 
@@ -569,6 +593,9 @@ interface InternalState {
   sourceCanvas: OffscreenCanvas | HTMLCanvasElement
   sourceCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D
   disposed: boolean
+  // Mutated in-place after every detect() call so the live UI can read
+  // the latest pipeline stats without a round trip.
+  lastStats: PoseDetectStats
 }
 
 function makeOffscreen(
@@ -732,10 +759,19 @@ export async function createPoseDetector(
     sourceCanvas,
     sourceCtx,
     disposed: false,
+    lastStats: {
+      yoloDetections: 0,
+      yoloTopScore: 0,
+      kpCount: 0,
+      kpMaxConf: 0,
+      inferenceMs: 0,
+      provider,
+    } as PoseDetectStats,
   }
 
   return {
     detect: (source) => detectImpl(state, source),
+    getLastStats: () => state.lastStats,
     dispose: () => disposeImpl(state),
   }
 }
@@ -751,6 +787,16 @@ async function detectImpl(
   if (state.disposed) {
     throw new Error('[browserPose] detect() called after dispose()')
   }
+
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+  // Reset per-call stats up-front. We'll fill them in as the pipeline
+  // progresses; an early null-return below leaves the zeros visible to
+  // the UI so the user can see "yolo found nothing".
+  state.lastStats.yoloDetections = 0
+  state.lastStats.yoloTopScore = 0
+  state.lastStats.kpCount = 0
+  state.lastStats.kpMaxConf = 0
+  state.lastStats.inferenceMs = 0
 
   const { w: srcW, h: srcH } = getSourceDims(source)
   if (!srcW || !srcH || !Number.isFinite(srcW) || !Number.isFinite(srcH)) {
@@ -809,7 +855,14 @@ async function detectImpl(
   )
   const nmsDets = nonMaxSuppression(rawDets, YOLO_NMS_IOU_THRESHOLD)
   const topDet = pickHighestPerson(nmsDets)
-  if (!topDet) return null
+  state.lastStats.yoloDetections = nmsDets.length
+  state.lastStats.yoloTopScore = topDet?.score ?? 0
+  if (!topDet) {
+    state.lastStats.inferenceMs = Math.round(
+      (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0,
+    )
+    return null
+  }
 
   // Map back from letterbox space to original frame pixels.
   const detInFrame = mapBoxFromLetterbox(topDet, yoloTx)
@@ -879,12 +932,20 @@ async function detectImpl(
   //   frame_px = crop_px + (cropX, cropY)
   const cocoKpts = new Float32Array(NUM_COCO_KEYPOINTS * 2)
   const cocoScores = new Float32Array(NUM_COCO_KEYPOINTS)
+  let kpMaxConf = 0
   for (let i = 0; i < NUM_COCO_KEYPOINTS; i++) {
     const mapped = mapKeypointToFrame(decoded[i], rtmTx, cropX, cropY)
     cocoKpts[i * 2] = mapped.x
     cocoKpts[i * 2 + 1] = mapped.y
     cocoScores[i] = mapped.score
+    if (mapped.score > kpMaxConf) kpMaxConf = mapped.score
   }
+
+  state.lastStats.kpCount = NUM_COCO_KEYPOINTS
+  state.lastStats.kpMaxConf = kpMaxConf
+  state.lastStats.inferenceMs = Math.round(
+    (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0,
+  )
 
   return coco17ToBlazepose33(cocoKpts, cocoScores, srcW, srcH)
 }

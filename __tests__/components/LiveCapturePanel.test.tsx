@@ -58,6 +58,7 @@ vi.mock('@/hooks/useLiveCapture', async (orig) => {
         // back camera ('environment') intentionally renders without
         // mirroring so a separate test below covers that branch.
         facingMode: captureIsRecording ? ('user' as const) : null,
+        getLastDetectStats: () => null,
       }
     },
   }
