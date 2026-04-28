@@ -36,6 +36,25 @@ const ALL_JOINT_GROUPS_VISIBLE: Record<JointGroup, boolean> = Object.keys(JOINT_
 // without hiding the skeleton through the next swing's prep phase.
 const SWING_PULSE_DURATION_MS = 400
 
+// Don't render the cold-start "Loading pose model…" UI for fast cache
+// hits — onnxruntime-web's IndexedDB-cached weights make subsequent
+// sessions resolve in <500ms, and a sub-300ms flash reads as visual
+// noise more than progress. A setTimeout primes the loading visible
+// flag at the 300ms mark; createPoseDetector clears it before that
+// fires on a cache hit.
+const MODEL_LOAD_VISIBLE_DELAY_MS = 300
+
+type ModelLoadState = {
+  loaded: number
+  total: number
+  label: 'yolo' | 'rtmpose'
+}
+
+function formatMb(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB'
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 function statusLabel(status: LiveStatus): string {
   // Translate the bare-string status from the live store into the
   // human-readable footer copy required by Phase 3.
@@ -154,6 +173,15 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   // Mount-time orphan detection. If the previous session never finished
   // uploading, offer to resume.
   const [orphan, setOrphan] = useState<OrphanedSession | null>(null)
+  // Phase 5D — first-time pose-model cold-start UX. modelLoadState holds
+  // the per-model bytes-loaded snapshot from onModelLoadProgress; we
+  // collapse the YOLO + RTMPose ticks into a single user-visible bar.
+  // showModelLoadUi is the debounced "actually render the bar" flag —
+  // gated behind a 300ms delay so cache-hit sessions don't flash a
+  // useless loading state.
+  const [modelLoadState, setModelLoadState] = useState<ModelLoadState | null>(null)
+  const [showModelLoadUi, setShowModelLoadUi] = useState(false)
+  const modelLoadDelayHandleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const shotType = useLiveStore((s) => s.shotType)
   const setShotType = useLiveStore((s) => s.setShotType)
@@ -209,6 +237,14 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       // React state IS okay for the pill: useLiveCapture only emits
       // onPoseQuality on transitions, not per-frame.
       setPoseQuality(q)
+    },
+    onModelLoadProgress: (loaded, total, label) => {
+      // Phase 5D — surface YOLO + RTMPose download progress so the
+      // pre-start screen can show "Loading pose model…" before the
+      // first session goes live. Subsequent sessions pull from the
+      // loader's cache and may fire a single (total, total) tick or
+      // none at all — the 300ms debounce below keeps the UI quiet.
+      setModelLoadState({ loaded, total, label })
     },
   })
 
@@ -303,6 +339,42 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       setPoseQuality(null)
     }
   }, [isRecording])
+
+  // Phase 5D — debounced "show loading model" UI. We arm a 300ms timer
+  // when a load tick first arrives; if the load completes before that
+  // fires (cache-hit path), we never flip showModelLoadUi to true and
+  // the user sees no flash. On cold start the timer fires, the bar
+  // appears, and the bytes-loaded text drives the rest of the wait.
+  useEffect(() => {
+    // Clear the loading UI as soon as recording starts. The bar's job is
+    // pre-start only — once the detector is ready and frames are flowing
+    // there's nothing left to load.
+    if (isRecording) {
+      if (modelLoadDelayHandleRef.current != null) {
+        clearTimeout(modelLoadDelayHandleRef.current)
+        modelLoadDelayHandleRef.current = null
+      }
+      setShowModelLoadUi(false)
+      setModelLoadState(null)
+      return
+    }
+    // No load tick yet — nothing to show or schedule.
+    if (modelLoadState == null) return
+    // Already showing — no further work; the bar updates via state.
+    if (showModelLoadUi) return
+    // Already armed — let it fire.
+    if (modelLoadDelayHandleRef.current != null) return
+    modelLoadDelayHandleRef.current = setTimeout(() => {
+      setShowModelLoadUi(true)
+      modelLoadDelayHandleRef.current = null
+    }, MODEL_LOAD_VISIBLE_DELAY_MS)
+    return () => {
+      if (modelLoadDelayHandleRef.current != null) {
+        clearTimeout(modelLoadDelayHandleRef.current)
+        modelLoadDelayHandleRef.current = null
+      }
+    }
+  }, [isRecording, modelLoadState, showModelLoadUi])
 
   // Mirror coach.isRequestInFlight() into the live store so
   // LiveCoachingTranscript (rendered in app/live/page.tsx as a
@@ -696,6 +768,38 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         </div>
       ) : null}
 
+      {/* Phase 5D — first-time pose-model cold-start UI. Shown only on
+          the truly-cold path (>300ms of bytes-arriving) and cleared the
+          moment recording starts. The bar disables Start so the user
+          can't fire a session before the detector is ready. */}
+      {showModelLoadUi && modelLoadState && !isRecording && !pendingResult ? (
+        <div
+          data-testid="model-load-progress"
+          className="rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4 space-y-3"
+        >
+          <p className="text-white font-medium">Loading pose model…</p>
+          <div
+            data-testid="model-load-bar"
+            className="h-2 w-full rounded-full bg-white/10 overflow-hidden"
+          >
+            <div
+              className="h-full bg-emerald-500 transition-all"
+              style={{
+                width:
+                  modelLoadState.total > 0
+                    ? `${Math.min(100, Math.round((modelLoadState.loaded / modelLoadState.total) * 100))}%`
+                    : '0%',
+              }}
+            />
+          </div>
+          <p className="text-white/60 text-xs">
+            {formatMb(modelLoadState.loaded)} / {formatMb(modelLoadState.total)}
+            {' · '}
+            First-time only — future sessions start instantly.
+          </p>
+        </div>
+      ) : null}
+
       {/* Controls — hidden once we're in the post-stop review flow so the
           Stop button can't fire a second time on a recording that's
           already finished. */}
@@ -704,10 +808,11 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
           {!isRecording ? (
             <button
               onClick={handleStart}
-              disabled={busy}
+              disabled={busy || showModelLoadUi}
+              data-testid="start-button"
               className="flex-1 bg-emerald-500 hover:bg-emerald-400 disabled:bg-white/10 disabled:text-white/40 text-white font-bold rounded-2xl px-6 py-4 text-lg transition-all"
             >
-              {busy ? 'Starting…' : 'Start'}
+              {showModelLoadUi ? 'Loading…' : busy ? 'Starting…' : 'Start'}
             </button>
           ) : (
             <button

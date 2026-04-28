@@ -14,7 +14,7 @@
  * `onSwing` without spinning up real device APIs.
  */
 import React from 'react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act } from '@testing-library/react'
 import type { PoseQuality } from '@/hooks/useLiveCapture'
 import type { StreamedSwing } from '@/lib/liveSwingDetector'
@@ -27,6 +27,11 @@ type CaptureOpts = {
   onStatus?: (s: string) => void
   onPoseQuality?: (q: PoseQuality) => void
   onPoseFrame?: (f: unknown) => void
+  onModelLoadProgress?: (
+    loaded: number,
+    total: number,
+    label: 'yolo' | 'rtmpose',
+  ) => void
 }
 let lastCaptureOpts: CaptureOpts | null = null
 let captureIsRecording = true
@@ -266,6 +271,14 @@ describe('LiveCapturePanel — Phase 3 visibility surface', () => {
     expect(screen.getByTestId('status-label').textContent).toBe('Ready')
   })
 
+  it('passes onModelLoadProgress through to useLiveCapture', () => {
+    captureIsRecording = false
+    render(<LiveCapturePanel />)
+    // The panel must wire its onModelLoadProgress option so the cold-
+    // start UX has a way to receive YOLO/RTMPose download ticks.
+    expect(typeof lastCaptureOpts?.onModelLoadProgress).toBe('function')
+  })
+
   it('passes a reduced alpha scale to renderPose during the swing-detected pulse', async () => {
     captureIsRecording = true
     render(<LiveCapturePanel />)
@@ -291,5 +304,117 @@ describe('LiveCapturePanel — Phase 3 visibility surface', () => {
     const opts = lastCall[4] as { scale?: number }
     expect(opts.scale).toBeLessThan(1)
     expect(opts.scale).toBeGreaterThanOrEqual(0.4)
+  })
+})
+
+/**
+ * Phase 5D — cold-start "Loading pose model…" UX.
+ *
+ * The bar should:
+ *   - Stay hidden for fast cache-hit loads (<300ms from first tick to
+ *     recording).
+ *   - Appear after a 300ms debounce when bytes are actually downloading.
+ *   - Disable the Start button while it's showing.
+ *   - Disappear the moment recording starts.
+ */
+describe('LiveCapturePanel — Phase 5D pose-model loading UX', () => {
+  beforeEach(() => {
+    useLiveStore.setState({
+      status: 'idle',
+      swingCount: 0,
+      transcript: [],
+      coachRequestInFlight: false,
+    })
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('shows the "Loading pose model…" bar after the 300ms debounce', () => {
+    captureIsRecording = false
+    render(<LiveCapturePanel />)
+
+    // No bar before any progress tick.
+    expect(screen.queryByTestId('model-load-progress')).toBeNull()
+
+    // First tick from the (mocked) detector — bytes are arriving.
+    act(() => {
+      lastCaptureOpts?.onModelLoadProgress?.(2 * 1024 * 1024, 50 * 1024 * 1024, 'rtmpose')
+    })
+    // Still hidden — the 300ms debounce hasn't fired yet, so a fast
+    // cache-hit load wouldn't flash this UI.
+    expect(screen.queryByTestId('model-load-progress')).toBeNull()
+
+    // Fire the debounce timer.
+    act(() => {
+      vi.advanceTimersByTime(310)
+    })
+    expect(screen.getByTestId('model-load-progress')).toBeInTheDocument()
+    expect(screen.getByTestId('model-load-progress').textContent).toContain('Loading pose model')
+    // Loaded / total readout in MB.
+    expect(screen.getByTestId('model-load-progress').textContent).toMatch(/2\.0 MB \/ 50\.0 MB/)
+  })
+
+  it('disables the Start button while the model is loading', () => {
+    captureIsRecording = false
+    render(<LiveCapturePanel />)
+
+    // Pre-load: button enabled.
+    const before = screen.getByTestId('start-button') as HTMLButtonElement
+    expect(before.disabled).toBe(false)
+    expect(before.textContent).toContain('Start')
+
+    act(() => {
+      lastCaptureOpts?.onModelLoadProgress?.(1 * 1024 * 1024, 50 * 1024 * 1024, 'yolo')
+    })
+    act(() => {
+      vi.advanceTimersByTime(310)
+    })
+
+    const during = screen.getByTestId('start-button') as HTMLButtonElement
+    expect(during.disabled).toBe(true)
+    expect(during.textContent).toContain('Loading')
+  })
+
+  it('does NOT show the loading bar when the cache hit is faster than 300ms', () => {
+    captureIsRecording = false
+    const { rerender } = render(<LiveCapturePanel />)
+
+    act(() => {
+      lastCaptureOpts?.onModelLoadProgress?.(50 * 1024 * 1024, 50 * 1024 * 1024, 'rtmpose')
+    })
+    // Recording flips on at the 200ms mark (faster than the 300ms
+    // debounce). The bar should never have rendered.
+    act(() => {
+      vi.advanceTimersByTime(200)
+    })
+    captureIsRecording = true
+    rerender(<LiveCapturePanel />)
+    act(() => {
+      vi.advanceTimersByTime(200)
+    })
+
+    expect(screen.queryByTestId('model-load-progress')).toBeNull()
+  })
+
+  it('clears the loading bar once recording starts', () => {
+    captureIsRecording = false
+    const { rerender } = render(<LiveCapturePanel />)
+
+    act(() => {
+      lastCaptureOpts?.onModelLoadProgress?.(5 * 1024 * 1024, 50 * 1024 * 1024, 'rtmpose')
+    })
+    act(() => {
+      vi.advanceTimersByTime(310)
+    })
+    expect(screen.getByTestId('model-load-progress')).toBeInTheDocument()
+
+    // Detector is ready — recording goes live.
+    captureIsRecording = true
+    rerender(<LiveCapturePanel />)
+
+    expect(screen.queryByTestId('model-load-progress')).toBeNull()
   })
 })
