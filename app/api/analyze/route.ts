@@ -357,7 +357,9 @@ VOICE RULES (follow these strictly):
 - Keep it practical. Every piece of advice should be something they can try on the very next ball.
 - Sound encouraging, not critical. You're helping, not grading.
 - No bullet points with just numbers. No tables. No clinical language.
-- Write "you" and "your" constantly. Talk TO the player.`
+- Write "you" and "your" constantly. Talk TO the player.
+
+For every coaching cue you give, also recommend ONE OR TWO short exercises the player can do to fix that specific issue. Real drills, not generic "practice more" filler. Examples: "shadow forehands focusing on a relaxed elbow at contact, 20 reps each side", "slow-mo unit-turn drill against a fence, 10 reps", "wall rallies emphasizing early shoulder turn, 50 contacts." Specific, court-runnable, tied to the cue you just gave.`
 
   // Primary (tool_use) system prompt. Relaxes the em-dash rule just for the
   // literal advanced-baseline template, and instructs the model to emit its
@@ -374,6 +376,8 @@ VOICE RULES (follow these strictly):
 - Sound encouraging, not critical. You're helping, not grading.
 - No bullet points with just numbers. No tables. No clinical language.
 - Write "you" and "your" constantly. Talk TO the player.
+
+For every cue you emit, the schema requires 1-2 entries in the cue's "exercises" array. These are short, court-runnable drills that fix the specific issue described in that cue. Real drills, not generic "practice more" filler. Examples: "shadow forehands focusing on a relaxed elbow at contact, 20 reps each side", "slow-mo unit-turn drill against a fence, 10 reps", "wall rallies emphasizing early shoulder turn, 50 contacts." Each exercise must tie directly to the cue's title.
 
 You will emit your response by calling the emit_coaching tool. Do not write prose outside the tool call.`
 

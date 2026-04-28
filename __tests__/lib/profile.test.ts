@@ -158,10 +158,13 @@ describe('TIER_RULES phrasing invariants', () => {
 
 describe('TIER_MAX_TOKENS', () => {
   it('is monotonic (advanced < beginner < intermediate < competitive) and has expected values', () => {
-    expect(TIER_MAX_TOKENS.advanced).toBe(250)
-    expect(TIER_MAX_TOKENS.beginner).toBe(500)
-    expect(TIER_MAX_TOKENS.intermediate).toBe(700)
-    expect(TIER_MAX_TOKENS.competitive).toBe(900)
+    // Bumped after adding per-cue exercises (1-2 drills each) — the
+    // previous ceiling truncated 3-cue responses mid-sentence. See
+    // lib/profile.ts:TIER_MAX_TOKENS for the rationale.
+    expect(TIER_MAX_TOKENS.advanced).toBe(350)
+    expect(TIER_MAX_TOKENS.beginner).toBe(750)
+    expect(TIER_MAX_TOKENS.intermediate).toBe(1000)
+    expect(TIER_MAX_TOKENS.competitive).toBe(1300)
     expect(TIER_MAX_TOKENS.advanced).toBeLessThan(TIER_MAX_TOKENS.beginner)
     expect(TIER_MAX_TOKENS.beginner).toBeLessThan(TIER_MAX_TOKENS.intermediate)
     expect(TIER_MAX_TOKENS.intermediate).toBeLessThan(TIER_MAX_TOKENS.competitive)

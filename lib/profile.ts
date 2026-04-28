@@ -222,21 +222,24 @@ export const TIER_RULES: Record<SkillTier, string> = {
 // metrics extractor and integration tests reference one source of truth.
 export const ADVANCED_BASELINE_TEMPLATE = 'This is clean. Save it as your baseline.'
 
-// Per-tier token ceiling passed to Anthropic's max_tokens. Roughly 4x the
-// word cap to give the model headroom without letting verbosity-bias run.
-// Ordering reflects the research invariant: advanced produces the least,
-// competitive the most. Monotonic.
+// Per-tier token ceiling passed to Anthropic's max_tokens. Bumped after
+// adding exercises to each cue (1-2 drills per cue) — the previous ceiling
+// was tight enough that a 3-cue response could token-out mid-sentence,
+// which the user saw as "advice cut off after section 2." Each cue is now
+// title + body + 1-2 exercise lines, so we need ~30-40% more room.
+// Ordering still reflects the research invariant: advanced produces the
+// least, competitive the most. Monotonic.
 export const TIER_MAX_TOKENS: Record<SkillTier, number> = {
-  advanced: 250,
-  beginner: 500,
-  intermediate: 700,
-  competitive: 900,
+  advanced: 350,
+  beginner: 750,
+  intermediate: 1000,
+  competitive: 1300,
 }
 
 // Fallback used when no profile is available (generic / skipped path).
 // Between intermediate and competitive so the skipped-path inference has
 // room to pick any tier.
-export const DEFAULT_MAX_TOKENS = 800
+export const DEFAULT_MAX_TOKENS = 1200
 
 // Tool-use contract. Each tier forces the model through a JSON schema that
 // mechanically bounds the number of cues it can emit. COACHING_TOOL_NAME is
@@ -247,7 +250,12 @@ export const COACHING_TOOL_NAME = 'emit_coaching' as const
 
 export type CoachingToolInput = {
   strengths: Array<{ text: string }>
-  cues: Array<{ title: string; body: string }>
+  // Each cue is one coaching point. `exercises` is 1-2 short drills the
+  // player can run to fix the issue described by the cue (e.g.
+  // "shadow swings emphasizing a relaxed elbow bend at contact, 10 reps
+  // each side"). Optional so the advanced-baseline path (cues=[]) still
+  // validates.
+  cues: Array<{ title: string; body: string; exercises?: Array<string> }>
   closing: string
 }
 
@@ -297,10 +305,21 @@ export const COACHING_TOOL_SCHEMAS: Record<SkillTier, {
               items: {
                 type: 'object',
                 additionalProperties: false,
-                required: ['title', 'body'],
+                // exercises is required when cues are emitted (every
+                // recommendation should come with 1-2 drills the player
+                // can do to address the issue). The advanced-baseline
+                // path emits cues=[] entirely, so this requirement only
+                // bites when there's something to fix.
+                required: ['title', 'body', 'exercises'],
                 properties: {
                   title: { type: 'string', minLength: 2, maxLength: 60 },
                   body:  { type: 'string', minLength: 2, maxLength: maxCueBodyChars },
+                  exercises: {
+                    type: 'array',
+                    minItems: 1,
+                    maxItems: 2,
+                    items: { type: 'string', minLength: 8, maxLength: 200 },
+                  },
                 },
               },
             },
@@ -341,16 +360,37 @@ export function buildCoachingToolInput(
   const rawCues = obj.cues
   if (!Array.isArray(rawCues)) return null
   if (rawCues.length < bounds.minCues || rawCues.length > bounds.maxCues) return null
-  const cues: Array<{ title: string; body: string }> = []
+  const cues: Array<{ title: string; body: string; exercises?: Array<string> }> = []
   for (const c of rawCues) {
     if (!c || typeof c !== 'object') return null
     const title = (c as Record<string, unknown>).title
     const body = (c as Record<string, unknown>).body
+    const rawExercises = (c as Record<string, unknown>).exercises
     if (typeof title !== 'string' || typeof body !== 'string') return null
     const trimmedTitle = title.trim()
     const trimmedBody = body.trim()
     if (!trimmedTitle || !trimmedBody) return null
-    cues.push({ title: trimmedTitle, body: trimmedBody })
+
+    // Exercises are required on every emitted cue. Tolerate an absent
+    // field (empty array) for backward compatibility with persisted
+    // analysis_events rows generated before exercises were added.
+    let exercises: string[] | undefined
+    if (rawExercises !== undefined) {
+      if (!Array.isArray(rawExercises)) return null
+      if (rawExercises.length > 2) return null
+      const cleaned: string[] = []
+      for (const ex of rawExercises) {
+        if (typeof ex !== 'string') return null
+        const trimmed = ex.trim()
+        if (!trimmed) return null
+        cleaned.push(trimmed)
+      }
+      if (cleaned.length > 0) exercises = cleaned
+    }
+
+    cues.push(
+      exercises ? { title: trimmedTitle, body: trimmedBody, exercises } : { title: trimmedTitle, body: trimmedBody },
+    )
   }
 
   const rawClosing = obj.closing
@@ -425,6 +465,13 @@ export function renderCoachingToolInputToMarkdown(
       parts.push('')
       parts.push(`**${idx + 1}. ${cue.title}**`)
       parts.push(cue.body)
+      if (cue.exercises && cue.exercises.length > 0) {
+        parts.push('')
+        parts.push('*Try this:*')
+        for (const ex of cue.exercises) {
+          parts.push(`- ${ex}`)
+        }
+      }
     })
   }
 
