@@ -39,6 +39,10 @@ export interface UseLiveCoachReturn {
   reset: () => void
   // Convenience flag for the UI: true while a coach request is in flight.
   isRequestInFlight: () => boolean
+  // Wait until any outstanding coach request settles, or the timeout elapses
+  // (whichever comes first). Used by the Stop flow so analysis_events rows
+  // are written before we backfill session_id.
+  awaitInFlight: (timeoutMs: number) => Promise<void>
 }
 
 type InternalSwing = {
@@ -89,6 +93,9 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
   const pendingRef = useRef<InternalSwing[]>([])
   const batchIndexRef = useRef(0)
   const inFlightRef = useRef(false)
+  // Resolvers for pending awaitInFlight() callers. Flushed when inFlightRef
+  // flips back to false (batch settled) or when reset() is called.
+  const inFlightWaitersRef = useRef<Array<() => void>>([])
   const lastBatchWallMsRef = useRef(0)
   // Wall-clock timestamp (Date.now()) of the most recent swing pushed via
   // pushSwing(). Drives both the idle timer (idleTimeoutMs since last swing)
@@ -239,6 +246,14 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
     lastBatchWallMsRef.current = Date.now()
     setLastBatchAtMs(lastBatchWallMsRef.current)
     inFlightRef.current = false
+    // Notify any awaitInFlight() callers that the batch has settled.
+    if (inFlightWaitersRef.current.length > 0) {
+      const waiters = inFlightWaitersRef.current
+      inFlightWaitersRef.current = []
+      for (const w of waiters) {
+        try { w() } catch { /* ignore */ }
+      }
+    }
 
     if (result.kind === 'ok') {
       // Successful cue: clear any prior error banner and append the line.
@@ -339,9 +354,53 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
     clearGraceTimer()
     setCoachingError(null)
     ttsQueue.reset()
+    // Resolve any pending awaitInFlight() callers — the session is over.
+    if (inFlightWaitersRef.current.length > 0) {
+      const waiters = inFlightWaitersRef.current
+      inFlightWaitersRef.current = []
+      for (const w of waiters) {
+        try { w() } catch { /* ignore */ }
+      }
+    }
   }, [clearGraceTimer, clearIdleTimer, setCoachingError, ttsQueue])
 
   const isRequestInFlight = useCallback(() => inFlightRef.current, [])
 
-  return { pushSwing, setShotType, markSessionStart, primeTts, reset, isRequestInFlight }
+  const awaitInFlight = useCallback((timeoutMs: number) => {
+    return new Promise<void>((resolve) => {
+      // Fast path: nothing in flight, resolve immediately.
+      if (!inFlightRef.current) {
+        resolve()
+        return
+      }
+      let settled = false
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = null
+      const finish = () => {
+        if (settled) return
+        settled = true
+        if (timeoutHandle != null) {
+          clearTimeout(timeoutHandle)
+          timeoutHandle = null
+        }
+        // Drop ourselves from the waiters list if still present so a later
+        // batch settle doesn't double-resolve.
+        const idx = inFlightWaitersRef.current.indexOf(finish)
+        if (idx >= 0) inFlightWaitersRef.current.splice(idx, 1)
+        resolve()
+      }
+      // Register a one-shot waiter; the batch-settle path flushes the list.
+      inFlightWaitersRef.current.push(finish)
+      // Cap the wait so a wedged request can never block Stop forever.
+      const cap = Math.max(0, timeoutMs)
+      if (cap > 0) {
+        timeoutHandle = setTimeout(finish, cap)
+      } else {
+        // Zero/negative timeout still yields a microtask so the caller
+        // gets a real Promise tick before resolving.
+        queueMicrotask(finish)
+      }
+    })
+  }, [])
+
+  return { pushSwing, setShotType, markSessionStart, primeTts, reset, isRequestInFlight, awaitInFlight }
 }

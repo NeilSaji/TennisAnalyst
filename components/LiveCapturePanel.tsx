@@ -10,6 +10,12 @@ import { usePoseStore } from '@/store'
 import { renderPose } from './PoseRenderer'
 import { JOINT_GROUPS, type JointGroup } from '@/lib/jointAngles'
 import type { PoseFrame } from '@/lib/supabase'
+import {
+  clearOrphanedSession,
+  getOrphanedSession,
+  saveOrphanedSession,
+  type OrphanedSession,
+} from '@/lib/liveSessionRecovery'
 import LiveSwingCounter from './LiveSwingCounter'
 
 const SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley'] as const
@@ -112,6 +118,8 @@ function extForMime(mimeType: string): string {
   return 'bin'
 }
 
+type ReviewPhase = 'review' | 'uploading' | 'error' | 'done'
+
 export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanelProps) {
   const router = useRouter()
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -125,12 +133,27 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   // the pulse decays without React state churn.
   const swingPulseAtRef = useRef<number>(0)
   const rafHandleRef = useRef<number | null>(null)
+  const reviewVideoRef = useRef<HTMLVideoElement | null>(null)
   const [poseQuality, setPoseQuality] = useState<PoseQuality | null>(null)
   // Triggers the swing-counter scale bump. Toggles 0/1 each onSwing so
   // we always re-run the keyframe transition even on back-to-back hits.
   const [counterPulseTick, setCounterPulseTick] = useState<number>(0)
   const [summary, setSummary] = useState<{ swings: number; durationMs: number } | null>(null)
   const [uploadStatus, setUploadStatus] = useState<string | null>(null)
+  // The recorded session, held until the user picks Save / Discard / Re-record.
+  const [pendingResult, setPendingResult] = useState<LiveSessionResult | null>(null)
+  // Object URL for the inline review player. Created when the user enters
+  // review, revoked when they leave it (or on unmount).
+  const [reviewVideoUrl, setReviewVideoUrl] = useState<string | null>(null)
+  // Where in the post-stop flow we are: review (just stopped), uploading,
+  // error (retry available), or done (handed off to /analyze).
+  const [reviewPhase, setReviewPhase] = useState<ReviewPhase>('review')
+  // "Waiting for last cue…" UI when awaitInFlight is blocking on an
+  // in-flight coach request at Stop time.
+  const [waitingForCue, setWaitingForCue] = useState(false)
+  // Mount-time orphan detection. If the previous session never finished
+  // uploading, offer to resume.
+  const [orphan, setOrphan] = useState<OrphanedSession | null>(null)
 
   const shotType = useLiveStore((s) => s.shotType)
   const setShotType = useLiveStore((s) => s.setShotType)
@@ -322,22 +345,16 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     await start(videoEl)
   }, [coach, setErrorMessage, setSessionStartedAtMs, setStatus, setSwingCount, start])
 
-  const handleStop = useCallback(async () => {
-    setUploadStatus('Finalizing recording…')
-    const result = await stop()
-    if (!result) {
-      setUploadStatus(null)
-      setStatus('idle')
-      return
-    }
-
-    setSummary({ swings: result.swings.length, durationMs: result.durationMs })
+  // Run the upload + save pipeline against an already-finalized recording.
+  // Pulled out of handleStop so the Retry button (after a failure) and the
+  // Resume-orphan path can re-fire it without re-recording.
+  const runSaveFlow = useCallback(async (
+    result: LiveSessionResult,
+    saveShotType: string,
+  ) => {
+    setReviewPhase('uploading')
     setStatus('uploading')
-    onSessionComplete?.(result)
-
-    // Give pending in-flight coach calls a moment to settle so their
-    // analysis_events rows are written before we backfill session_id.
-    await new Promise((r) => setTimeout(r, 2_000))
+    setErrorMessage(null)
 
     let blobUrl: string
     try {
@@ -351,9 +368,12 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       })
       blobUrl = uploaded.url
     } catch (err) {
+      // Persist the recording so the user can retry without losing it.
+      void saveOrphanedSession(result.blob, result.keypoints, result.swings, saveShotType)
       setErrorMessage(err instanceof Error ? err.message : 'Upload failed')
       setUploadStatus(null)
       setStatus('error')
+      setReviewPhase('error')
       return
     }
 
@@ -368,7 +388,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           blobUrl,
-          shotType,
+          shotType: saveShotType,
           keypointsJson: result.keypoints,
           swings: result.swings.map((s) => ({
             startFrame: s.startFrameIndex,
@@ -381,12 +401,17 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       })
       if (!res.ok) {
         const msg = await res.text().catch(() => 'Save failed')
+        void saveOrphanedSession(result.blob, result.keypoints, result.swings, saveShotType)
         setErrorMessage(`Save failed: ${msg}`)
         setUploadStatus(null)
         setStatus('error')
+        setReviewPhase('error')
         return
       }
       const { sessionId } = (await res.json()) as { sessionId: string }
+
+      // Success — clear any prior orphan (this session is safely persisted).
+      void clearOrphanedSession()
 
       // Hydrate usePoseStore so /analyze picks this session up identically to
       // an uploaded clip.
@@ -395,18 +420,20 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       poseSetBlobUrl(blobUrl)
       poseSetLocalVideoUrl(objectUrl)
       poseSetSessionId(sessionId)
-      poseSetShotType(shotType)
+      poseSetShotType(saveShotType)
 
       setUploadStatus(null)
       setStatus('complete')
+      setReviewPhase('done')
       router.replace('/analyze')
     } catch (err) {
+      void saveOrphanedSession(result.blob, result.keypoints, result.swings, saveShotType)
       setErrorMessage(err instanceof Error ? err.message : 'Save failed')
       setUploadStatus(null)
       setStatus('error')
+      setReviewPhase('error')
     }
   }, [
-    onSessionComplete,
     poseSetBlobUrl,
     poseSetFramesData,
     poseSetLocalVideoUrl,
@@ -415,17 +442,125 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     router,
     setErrorMessage,
     setStatus,
-    shotType,
-    stop,
     transcript,
   ])
 
-  const handleReset = useCallback(() => {
+  const handleStop = useCallback(async () => {
+    setUploadStatus('Finalizing recording…')
+    const result = await stop()
+    if (!result) {
+      setUploadStatus(null)
+      setStatus('idle')
+      return
+    }
+
+    setSummary({ swings: result.swings.length, durationMs: result.durationMs })
+    onSessionComplete?.(result)
+
+    // Wait for any in-flight coach call to settle so its analysis_events row
+    // is written before /api/sessions/live backfills session_id. Capped at
+    // 5s so a wedged request can't block the player at Stop time.
+    if (coach.isRequestInFlight()) {
+      setWaitingForCue(true)
+      setUploadStatus('Waiting for last cue…')
+      await coach.awaitInFlight(5_000)
+      setWaitingForCue(false)
+    }
+
+    // Hold the recording in review state. The user picks Save / Discard /
+    // Re-record next; only Save kicks off the upload + persist flow.
+    setPendingResult(result)
+    setReviewPhase('review')
+    setUploadStatus(null)
+    setStatus('idle')
+  }, [coach, onSessionComplete, setStatus, stop])
+
+  // Build (and tear down) the inline review player's object URL. We only
+  // create one URL per pendingResult so the <video> element stays stable
+  // across re-renders.
+  useEffect(() => {
+    if (!pendingResult) return
+    const url = URL.createObjectURL(pendingResult.blob)
+    setReviewVideoUrl(url)
+    return () => {
+      URL.revokeObjectURL(url)
+      setReviewVideoUrl(null)
+    }
+  }, [pendingResult])
+
+  // On mount, see if a previous session never finished uploading. If so,
+  // surface the resume prompt — the recording itself is already in IDB.
+  useEffect(() => {
+    let cancelled = false
+    void getOrphanedSession().then((found) => {
+      if (cancelled) return
+      if (found) setOrphan(found)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const handleSavePending = useCallback(async () => {
+    if (!pendingResult) return
+    await runSaveFlow(pendingResult, shotType)
+  }, [pendingResult, runSaveFlow, shotType])
+
+  const handleDiscardPending = useCallback(() => {
+    setPendingResult(null)
+    setSummary(null)
+    setUploadStatus(null)
+    setErrorMessage(null)
+    setReviewPhase('review')
+    setStatus('idle')
+    swingCountRef.current = 0
+    setSwingCount(0)
+  }, [setErrorMessage, setStatus, setSwingCount])
+
+  const handleRerecordPending = useCallback(() => {
+    handleDiscardPending()
+    coach.reset()
+    resetSession()
+  }, [coach, handleDiscardPending, resetSession])
+
+  const handleRetrySave = useCallback(async () => {
+    if (!pendingResult) return
+    setErrorMessage(null)
+    await runSaveFlow(pendingResult, shotType)
+  }, [pendingResult, runSaveFlow, setErrorMessage, shotType])
+
+  const handleResumeOrphan = useCallback(async () => {
+    if (!orphan) return
+    const result: LiveSessionResult = {
+      blob: orphan.blob,
+      blobMimeType: orphan.blob.type || 'video/webm',
+      keypoints: orphan.keypoints,
+      swings: orphan.swings,
+      durationMs: 0,
+    }
+    setSummary({ swings: orphan.swings.length, durationMs: 0 })
+    setPendingResult(result)
+    setReviewPhase('review')
+    setOrphan(null)
+  }, [orphan])
+
+  const handleDiscardOrphan = useCallback(() => {
+    setOrphan(null)
+    void clearOrphanedSession()
+  }, [])
+
+  // Kept for future "Hard reset" affordance (e.g. global error). The
+  // post-stop flow uses the more targeted Discard / Re-record handlers
+  // above instead — those preserve the streaming camera state.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _handleReset = useCallback(() => {
     abort()
     coach.reset()
     resetSession()
     swingCountRef.current = 0
     setSummary(null)
+    setPendingResult(null)
+    setReviewPhase('review')
   }, [abort, coach, resetSession])
 
   const busy = captureStatus === 'requesting-permissions' || captureStatus === 'initializing' || captureStatus === 'stopping'
@@ -532,37 +667,132 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         ) : null}
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-col sm:flex-row gap-3">
-        {!isRecording ? (
-          <button
-            onClick={handleStart}
-            disabled={busy}
-            className="flex-1 bg-emerald-500 hover:bg-emerald-400 disabled:bg-white/10 disabled:text-white/40 text-white font-bold rounded-2xl px-6 py-4 text-lg transition-all"
-          >
-            {busy ? 'Starting…' : 'Start'}
-          </button>
-        ) : (
-          <button
-            onClick={handleStop}
-            className="flex-1 bg-red-500 hover:bg-red-400 text-white font-bold rounded-2xl px-6 py-4 text-lg transition-all"
-          >
-            Stop
-          </button>
-        )}
-        {summary ? (
-          <button
-            onClick={handleReset}
-            className="bg-white/10 hover:bg-white/20 text-white font-medium rounded-2xl px-6 py-4 transition-all"
-          >
-            New session
-          </button>
-        ) : null}
-      </div>
+      {/* Resume prompt — appears on mount when an orphaned upload exists. */}
+      {orphan && !pendingResult && !isRecording ? (
+        <div
+          data-testid="resume-orphan-prompt"
+          className="rounded-2xl border border-amber-400/30 bg-amber-500/10 px-5 py-4 space-y-3"
+        >
+          <p className="text-white font-medium">
+            We saved a session you didn&apos;t finish uploading. Resume?
+          </p>
+          <p className="text-white/60 text-sm">
+            {orphan.swings.length} {orphan.swings.length === 1 ? 'swing' : 'swings'} detected.
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleResumeOrphan}
+              className="bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl px-4 py-2 text-sm transition-all"
+            >
+              Resume
+            </button>
+            <button
+              onClick={handleDiscardOrphan}
+              className="bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl px-4 py-2 text-sm transition-all"
+            >
+              Discard
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Controls — hidden once we're in the post-stop review flow so the
+          Stop button can't fire a second time on a recording that's
+          already finished. */}
+      {!pendingResult ? (
+        <div className="flex flex-col sm:flex-row gap-3">
+          {!isRecording ? (
+            <button
+              onClick={handleStart}
+              disabled={busy}
+              className="flex-1 bg-emerald-500 hover:bg-emerald-400 disabled:bg-white/10 disabled:text-white/40 text-white font-bold rounded-2xl px-6 py-4 text-lg transition-all"
+            >
+              {busy ? 'Starting…' : 'Start'}
+            </button>
+          ) : (
+            <button
+              onClick={handleStop}
+              className="flex-1 bg-red-500 hover:bg-red-400 text-white font-bold rounded-2xl px-6 py-4 text-lg transition-all"
+            >
+              Stop
+            </button>
+          )}
+        </div>
+      ) : null}
+
+      {/* Pre-upload review screen. The user just hit Stop; before we burn
+          the upload roundtrip + Vercel Blob storage we let them inspect
+          the recording and pick Save / Discard / Re-record. */}
+      {pendingResult && reviewPhase === 'review' ? (
+        <div
+          data-testid="review-screen"
+          className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 space-y-4"
+        >
+          <p className="text-white font-semibold text-base">Review your session</p>
+          {reviewVideoUrl ? (
+            <video
+              ref={reviewVideoRef}
+              data-testid="review-video"
+              src={reviewVideoUrl}
+              controls
+              playsInline
+              className="w-full rounded-xl bg-black"
+            />
+          ) : null}
+          <div className="flex flex-wrap gap-4 text-sm text-white/70">
+            <span>
+              <span className="text-white font-semibold">{summary?.swings ?? 0}</span>{' '}
+              {summary?.swings === 1 ? 'swing' : 'swings'}
+            </span>
+            <span>
+              <span className="text-white font-semibold">{displaySeconds}s</span> duration
+            </span>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button
+              onClick={handleSavePending}
+              className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl px-4 py-3 transition-all"
+            >
+              Save
+            </button>
+            <button
+              onClick={handleDiscardPending}
+              className="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl px-4 py-3 transition-all"
+            >
+              Discard
+            </button>
+            <button
+              onClick={handleRerecordPending}
+              className="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl px-4 py-3 transition-all"
+            >
+              Re-record
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {errorMessage ? (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 text-red-200 text-sm px-4 py-3">
-          {errorMessage}
+        <div
+          data-testid="error-box"
+          className="rounded-xl border border-red-500/30 bg-red-500/10 text-red-200 text-sm px-4 py-3 space-y-3"
+        >
+          <p>{errorMessage}</p>
+          {pendingResult && reviewPhase === 'error' ? (
+            <div className="flex gap-2">
+              <button
+                onClick={handleRetrySave}
+                className="bg-red-500 hover:bg-red-400 text-white font-semibold rounded-lg px-3 py-1.5 text-xs transition-all"
+              >
+                Retry
+              </button>
+              <button
+                onClick={handleDiscardPending}
+                className="bg-white/10 hover:bg-white/20 text-white font-medium rounded-lg px-3 py-1.5 text-xs transition-all"
+              >
+                Discard
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -571,12 +801,17 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       ) : null}
 
       {uploadStatus ? (
-        <div className="rounded-xl border border-white/10 bg-white/[0.04] text-white text-sm px-4 py-3">
-          {uploadStatus}
+        <div
+          data-testid="upload-status"
+          className="rounded-xl border border-white/10 bg-white/[0.04] text-white text-sm px-4 py-3"
+        >
+          {waitingForCue ? 'Waiting for last cue…' : uploadStatus}
         </div>
       ) : null}
 
-      {summary && !uploadStatus ? (
+      {/* Hand-off summary — shown only after the upload+save chain has
+          completed and we're navigating to /analyze. */}
+      {summary && reviewPhase === 'done' && !uploadStatus ? (
         <div className="rounded-2xl border border-white/10 bg-white/[0.02] px-5 py-4 space-y-1">
           <p className="text-white font-medium">
             {summary.swings} {summary.swings === 1 ? 'swing' : 'swings'} detected in {displaySeconds}s

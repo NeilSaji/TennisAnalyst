@@ -53,7 +53,39 @@ export default function AnalyzePage() {
   const [savedSegmentIds, setSavedSegmentIds] = useState<Set<string>>(new Set())
   const [errorBySegmentId, setErrorBySegmentId] = useState<Record<string, string | null>>({})
 
-  const swings = useMemo(() => detectSwings(allFrames), [allFrames])
+  // Prefer persisted live-session swings (from video_segments) over a fresh
+  // detectSwings() pass. The two formulas can disagree by ±1–2 swings — live
+  // sees them at 15fps as they're emitted, post-hoc detectSwings re-derives
+  // them from smoothed frames at the persisted FPS. Showing one count in
+  // live and a different count in /analyze breaks trust; the persisted list
+  // is the canonical record of what the player just did.
+  const swings = useMemo<SwingSegment[]>(() => {
+    if (segments.length > 0 && allFrames.length > 0) {
+      const fromSegments: SwingSegment[] = segments
+        .slice()
+        .sort((a, b) => a.segment_index - b.segment_index)
+        .map((seg, i) => {
+          const startFrame = Math.max(0, Math.min(allFrames.length - 1, seg.start_frame))
+          const endFrame = Math.max(startFrame, Math.min(allFrames.length - 1, seg.end_frame))
+          const sliced = allFrames.slice(startFrame, endFrame + 1)
+          return {
+            index: i + 1,
+            startFrame,
+            endFrame,
+            startMs: seg.start_ms,
+            endMs: seg.end_ms,
+            // No persisted peak frame — fall back to the midpoint of the
+            // segment (sufficient for VideoCanvas's contact-frame coloring;
+            // it just needs *a* frame inside the swing).
+            peakFrame: startFrame + Math.floor(sliced.length / 2),
+            frames: sliced,
+          }
+        })
+        .filter((s) => s.frames.length > 0)
+      if (fromSegments.length > 0) return fromSegments
+    }
+    return detectSwings(allFrames)
+  }, [segments, allFrames])
   const hasMultipleSwings = swings.length > 1
 
   // Contact frame for the currently-displayed swing. When multiple swings
