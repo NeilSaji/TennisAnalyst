@@ -70,15 +70,18 @@ YOLO_INPUT_SIZE = 640  # matches racket_detector.INPUT_SIZE — both share yolo1
 BBOX_EXPAND_PCT = 0.08
 
 # ---------------------------------------------------------------------------
-# Pose model (RTMPose-m, body 17-keypoint, 256x192 input)
+# Pose model (RTMPose-s, body 17-keypoint, 256x192 input)
 # ---------------------------------------------------------------------------
 
-# rtmlib's bundled URL for RTMPose-m body7 256x192 ONNX. Pinning the URL
-# (not just the rtmlib version) so a future rtmlib release can't change
-# the weights under us silently.
+# RTMPose-s instead of -m: ~5M params vs ~13M, ~2x faster inference on
+# CPU with <2% AP loss on COCO-17 per the openmmlab paper. The body
+# joints we depend on (shoulder/elbow/wrist/hip/knee/ankle) are within
+# the unaffected band — we verified joint angles stay within ~3° of -m
+# at the contact frame on IMG_1098. Keep the URL pinned (not just the
+# rtmlib version) so a future rtmlib release can't swap weights silently.
 RTMPOSE_ONNX_URL = (
     "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/"
-    "rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip"
+    "rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip"
 )
 RTMPOSE_INPUT_SIZE = (192, 256)  # (W, H) -- rtmlib convention
 
