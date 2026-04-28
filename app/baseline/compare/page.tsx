@@ -148,8 +148,17 @@ export default function BaselineComparePage() {
         }
       } catch (err) {
         if (err instanceof RailwayExtractError) {
-          console.info('[baseline/compare] Railway path unavailable, falling back to browser:', err.reason)
-          railwayFailReason = err.reason
+          console.info(
+            '[baseline/compare] Railway path unavailable, falling back to browser:',
+            err.reason, err.message,
+          )
+          // Concatenate reason + Error.message so the chip shows the
+          // category and the actual Railway error text. See UploadZone
+          // for the parallel implementation.
+          railwayFailReason =
+            err.message && err.message !== err.reason
+              ? `${err.reason}: ${err.message}`
+              : err.reason
         } else {
           console.error('[baseline/compare] Railway path errored, falling back to browser:', err)
           railwayFailReason = err instanceof Error ? err.message : 'unknown'

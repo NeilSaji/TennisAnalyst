@@ -36,6 +36,16 @@ const REASON_HINTS: Record<string, string> = {
   aborted: 'extraction was cancelled',
 }
 
+// Reason strings are now formatted as 'category: message' (e.g.
+// 'error-status: YOLO failed: CUDA OOM'). Look up the hint by the
+// category prefix so the user still gets a description for the broad
+// failure mode, while the raw text below shows the actual error.
+function lookupHint(reason: string): string | undefined {
+  const colon = reason.indexOf(':')
+  const category = colon === -1 ? reason : reason.slice(0, colon)
+  return REASON_HINTS[category]
+}
+
 export default function BackendChip({
   backend,
   reason,
@@ -47,7 +57,7 @@ export default function BackendChip({
 }) {
   if (!backend) return null
   const { text, classes } = LABELS[backend]
-  const hint = reason ? REASON_HINTS[reason] ?? reason : null
+  const hint = reason ? lookupHint(reason) ?? reason : null
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${classes} ${className}`}
@@ -58,7 +68,7 @@ export default function BackendChip({
       }
     >
       <span>{text}</span>
-      {hint && (
+      {reason && (
         <span className="opacity-70 normal-case">· {reason}</span>
       )}
     </span>

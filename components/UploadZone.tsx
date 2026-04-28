@@ -178,9 +178,19 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         // Any failure falls back to in-browser extraction silently.
         // Log the reason so we can tell 'Railway not configured' (normal
         // during staging) from 'Railway errored out' (needs attention).
+        // Concatenate reason + the underlying Error.message so the
+        // diagnostic chip shows BOTH the category ('error-status') and
+        // the actual Railway error text ('OOM', 'CUDA out of memory',
+        // 'YOLO failed: ...'). The category alone is rarely actionable.
         if (err instanceof RailwayExtractError) {
-          console.info('[UploadZone] Railway path unavailable, falling back to browser:', err.reason)
-          railwayFailReason = err.reason
+          console.info(
+            '[UploadZone] Railway path unavailable, falling back to browser:',
+            err.reason, err.message,
+          )
+          railwayFailReason =
+            err.message && err.message !== err.reason
+              ? `${err.reason}: ${err.message}`
+              : err.reason
         } else {
           console.error('[UploadZone] Railway path errored, falling back to browser:', err)
           railwayFailReason = err instanceof Error ? err.message : 'unknown'
