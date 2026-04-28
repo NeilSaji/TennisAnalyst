@@ -97,16 +97,19 @@ describe('useLiveCoach.isRequestInFlight()', () => {
     // Idle.
     expect(result.current.isRequestInFlight()).toBe(false)
 
-    // Push two swings — that's the batch threshold, so a batch fires
-    // immediately.
+    // Push two swings — that's the batch threshold. Phase 2 added a
+    // post-swing grace window (default 3s since last swing) to avoid
+    // firing mid-rally, so the batch is scheduled, not fired immediately.
     act(() => {
       result.current.pushSwing(fakeSwing(0))
       result.current.pushSwing(fakeSwing(1))
     })
 
-    // Allow the microtask queue (the fireBatch IIFE pre-await checks)
-    // to run so the fetch is actually issued.
+    // Advance past the post-swing grace window so the scheduled fire
+    // attempt actually issues the fetch.
     await act(async () => {
+      vi.advanceTimersByTime(3_500)
+      await Promise.resolve()
       await Promise.resolve()
     })
 
@@ -147,9 +150,11 @@ describe('useLiveCoach.isRequestInFlight()', () => {
       result.current.pushSwing(fakeSwing(1))
     })
 
-    // Let the first fetch reject, then advance through the 2s backoff
-    // so the retry runs and also rejects.
+    // Phase 2 added a post-swing grace window (default 3s). Advance past
+    // it so the first fetch is actually issued, then let it reject and
+    // advance through the 2s retry-backoff so the retry also rejects.
     await act(async () => {
+      vi.advanceTimersByTime(3_500)
       await Promise.resolve()
       await Promise.resolve()
       vi.advanceTimersByTime(2_000)
