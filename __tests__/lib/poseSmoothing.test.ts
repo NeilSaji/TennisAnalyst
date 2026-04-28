@@ -3,6 +3,7 @@ import {
   averageVisibility,
   landmarkBboxArea,
   isFrameConfident,
+  isBodyVisible,
   smoothFrames,
   filterImplausibleArmJoints,
 } from '@/lib/poseSmoothing'
@@ -125,6 +126,83 @@ describe('isFrameConfident', () => {
     // area = 0.1 * 0.1 = 0.01
     expect(isFrameConfident(landmarks, { minBboxArea: 0.005 })).toBe(true)
     expect(isFrameConfident(landmarks, { minBboxArea: 0.02 })).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isBodyVisible
+// ---------------------------------------------------------------------------
+
+describe('isBodyVisible', () => {
+  // Full-body pose with realistic vertical spread for the body-visible
+  // gate's 0.35 default. makeStandingPose() in helpers.ts is laid out
+  // tighter (0.25 -> 0.55) for joint-angle tests and is intentionally
+  // not used here.
+  const makeFullBodyLandmarks = () => [
+    makeLandmark(LANDMARK_INDICES.NOSE, 0.5, 0.1, 0.95),
+    makeLandmark(LANDMARK_INDICES.LEFT_SHOULDER, 0.55, 0.25, 0.95),
+    makeLandmark(LANDMARK_INDICES.RIGHT_SHOULDER, 0.45, 0.25, 0.95),
+    makeLandmark(LANDMARK_INDICES.LEFT_ELBOW, 0.6, 0.4, 0.95),
+    makeLandmark(LANDMARK_INDICES.RIGHT_ELBOW, 0.4, 0.4, 0.95),
+    makeLandmark(LANDMARK_INDICES.LEFT_WRIST, 0.62, 0.55, 0.95),
+    makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.38, 0.55, 0.95),
+    makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.53, 0.65, 0.95),
+    makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.47, 0.65, 0.95),
+    makeLandmark(LANDMARK_INDICES.LEFT_KNEE, 0.54, 0.8, 0.95),
+    makeLandmark(LANDMARK_INDICES.RIGHT_KNEE, 0.46, 0.8, 0.95),
+    makeLandmark(LANDMARK_INDICES.LEFT_ANKLE, 0.54, 0.95, 0.95),
+    makeLandmark(LANDMARK_INDICES.RIGHT_ANKLE, 0.46, 0.95, 0.95),
+  ]
+
+  it('returns false for face-only landmarks (no shoulders/hips/wrists)', () => {
+    const landmarks = [
+      makeLandmark(LANDMARK_INDICES.NOSE, 0.5, 0.1, 0.95),
+    ]
+    expect(isBodyVisible(landmarks)).toBe(false)
+  })
+
+  it('returns false for head + shoulders only (no hips)', () => {
+    const landmarks = [
+      makeLandmark(LANDMARK_INDICES.NOSE, 0.5, 0.1, 0.95),
+      makeLandmark(LANDMARK_INDICES.LEFT_SHOULDER, 0.55, 0.25, 0.95),
+      makeLandmark(LANDMARK_INDICES.RIGHT_SHOULDER, 0.45, 0.25, 0.95),
+      // Wrist visible but no hips at all -- common "head-and-shoulders"
+      // crop where the camera only sees the upper body.
+      makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.4, 0.4, 0.95),
+    ]
+    expect(isBodyVisible(landmarks)).toBe(false)
+  })
+
+  it('returns true for full body with all required landmarks high-visibility', () => {
+    // Vertical extent of the required landmarks (shoulders 0.25, wrists
+    // 0.55, hips 0.65) is 0.40, comfortably above the 0.35 default.
+    expect(isBodyVisible(makeFullBodyLandmarks())).toBe(true)
+  })
+
+  it('returns true when only one wrist is visible (single wrist required)', () => {
+    // Take a full pose, then occlude the left wrist -- the right wrist is
+    // still visible so the gate should pass.
+    const landmarks = makeFullBodyLandmarks().map((lm) =>
+      lm.id === LANDMARK_INDICES.LEFT_WRIST
+        ? { ...lm, visibility: 0.1 }
+        : lm,
+    )
+    expect(isBodyVisible(landmarks)).toBe(true)
+  })
+
+  it('returns false when vertical extent of required landmarks < 0.35', () => {
+    // Subject is too small / too cropped: shoulders, hips, and wrist all
+    // crammed into a ~0.2-tall band near the top of the frame. Visibility
+    // is fine on every landmark, but the player isn't really in the frame.
+    const landmarks = [
+      makeLandmark(LANDMARK_INDICES.LEFT_SHOULDER, 0.55, 0.25, 0.95),
+      makeLandmark(LANDMARK_INDICES.RIGHT_SHOULDER, 0.45, 0.25, 0.95),
+      makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.4, 0.30, 0.95),
+      makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.53, 0.45, 0.95),
+      makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.47, 0.45, 0.95),
+    ]
+    // vertical extent = 0.45 - 0.25 = 0.20, below the 0.35 default
+    expect(isBodyVisible(landmarks)).toBe(false)
   })
 })
 

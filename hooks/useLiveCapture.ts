@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { getPoseLandmarker, getMonotonicTimestamp } from '@/lib/mediapipe'
 import { computeJointAngles } from '@/lib/jointAngles'
-import { isFrameConfident, smoothFrames } from '@/lib/poseSmoothing'
+import { isBodyVisible, isFrameConfident, smoothFrames } from '@/lib/poseSmoothing'
 import { LiveSwingDetector, type StreamedSwing } from '@/lib/liveSwingDetector'
 import type { PoseFrame, Landmark, KeypointsJson } from '@/lib/supabase'
 
@@ -23,12 +23,27 @@ export type LiveSessionResult = {
   durationMs: number
 }
 
+export type PoseQuality = 'good' | 'weak' | 'no-body'
+
 export interface UseLiveCaptureOptions {
   onSwing?: (swing: StreamedSwing) => void
   onStatus?: (status: LiveCaptureStatus) => void
   // Target pose-detection rate. Real frames from getUserMedia are typically
   // 30fps; we run detection every Nth callback to cap MediaPipe load.
   targetDetectionFps?: number
+  /**
+   * Fired only on transitions between pose-quality states (not per-frame).
+   * 'good' = frame passed the strict body-presence gate (`isBodyVisible`).
+   * 'weak' = frame passed `isFrameConfident` but not `isBodyVisible` —
+   *          the player is only partially in frame (face-only, legs cut).
+   * 'no-body' = no usable detection in the last ~1s.
+   *
+   * Phase 1 only: callers are expected to set up the wiring; the UI pill
+   * that consumes this lives in Phase 3. Detector behavior already does
+   * the right thing without a UI consumer (face-only frames are excluded
+   * from the detector).
+   */
+  onPoseQuality?: (q: PoseQuality) => void
 }
 
 export interface UseLiveCaptureReturn {
@@ -75,10 +90,14 @@ function toLandmarks(raw: Array<{ x: number; y: number; z?: number; visibility?:
   }))
 }
 
+// How long after the last good/weak detection before we declare the
+// player gone. Matches the Phase 3 spec "no-body if no detection for ~1s".
+const NO_BODY_TIMEOUT_MS = 1000
+
 export function useLiveCapture(
   options: UseLiveCaptureOptions = {},
 ): UseLiveCaptureReturn {
-  const { onSwing, onStatus, targetDetectionFps = 15 } = options
+  const { onSwing, onStatus, onPoseQuality, targetDetectionFps = 15 } = options
 
   const [status, setStatusState] = useState<LiveCaptureStatus>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -98,6 +117,14 @@ export function useLiveCapture(
   const startedAtRef = useRef<number>(0)
   const frameCounterRef = useRef<number>(0)
   const lastDetectAtRef = useRef<number>(0)
+  // Track only the last *emitted* quality so we fire onPoseQuality on
+  // transitions, not on every frame.
+  const lastQualityRef = useRef<PoseQuality | null>(null)
+  // Wall-clock of the last frame where ANY pose was detected (good or
+  // weak). Used to flip to 'no-body' when nothing has been detected for
+  // NO_BODY_TIMEOUT_MS. We also poll this inside the detection loop on
+  // frames where MediaPipe returns nothing.
+  const lastDetectionAtRef = useRef<number>(0)
 
   const setStatus = useCallback(
     (next: LiveCaptureStatus) => {
@@ -161,6 +188,8 @@ export function useLiveCapture(
     chunksRef.current = []
     frameCounterRef.current = 0
     lastDetectAtRef.current = 0
+    lastQualityRef.current = null
+    lastDetectionAtRef.current = 0
     detectorRef.current = new LiveSwingDetector()
 
     setStatus('requesting-permissions')
@@ -247,6 +276,12 @@ export function useLiveCapture(
 
     const minFrameGapMs = 1000 / targetDetectionFps
 
+    const emitQuality = (q: PoseQuality) => {
+      if (lastQualityRef.current === q) return
+      lastQualityRef.current = q
+      onPoseQuality?.(q)
+    }
+
     const runOneDetection = (nowMs: number) => {
       if (generationRef.current !== generation) return
       if (nowMs - lastDetectAtRef.current < minFrameGapMs) return
@@ -257,16 +292,55 @@ export function useLiveCapture(
         const ts = getMonotonicTimestamp(nowMs - startedAtRef.current)
         const result = poseLandmarker.detectForVideo(canvas, ts)
         const raw = result?.landmarks?.[0]
-        if (!raw || raw.length === 0) return
+        if (!raw || raw.length === 0) {
+          // No pose at all this frame. If it's been long enough since the
+          // last hit, declare the player gone.
+          if (
+            lastDetectionAtRef.current > 0 &&
+            nowMs - lastDetectionAtRef.current >= NO_BODY_TIMEOUT_MS
+          ) {
+            emitQuality('no-body')
+          } else if (lastDetectionAtRef.current === 0) {
+            // Never seen anyone yet — start in 'no-body' so the UI can
+            // prompt "move into frame" before the first detection lands.
+            emitQuality('no-body')
+          }
+          return
+        }
         const landmarks = toLandmarks(raw)
-        if (!isFrameConfident(landmarks)) return
+        if (!isFrameConfident(landmarks)) {
+          if (
+            lastDetectionAtRef.current > 0 &&
+            nowMs - lastDetectionAtRef.current >= NO_BODY_TIMEOUT_MS
+          ) {
+            emitQuality('no-body')
+          }
+          return
+        }
+        // We have a usable pose — refresh the "last detected at" clock so
+        // the no-body timer resets even if the body-visible gate fails.
+        lastDetectionAtRef.current = nowMs
+
         const frame: PoseFrame = {
           frame_index: frameCounterRef.current++,
           timestamp_ms: Math.round(nowMs - startedAtRef.current),
           landmarks,
           joint_angles: computeJointAngles(landmarks),
         }
+        // Always push to framesRef so /analyze still has the full sequence
+        // even on weak frames. Only the strict gate below decides whether
+        // this frame drives the live swing detector.
         framesRef.current.push(frame)
+
+        if (!isBodyVisible(landmarks)) {
+          // Frame was loosely confident but full body wasn't visible
+          // (face-only, legs cut off, subject too small). Don't feed the
+          // detector — that would let face-only fidget become a swing.
+          emitQuality('weak')
+          return
+        }
+
+        emitQuality('good')
 
         const emitted = detectorRef.current?.feed(frame) ?? null
         if (emitted) {
@@ -299,7 +373,7 @@ export function useLiveCapture(
     }
 
     setStatus('recording')
-  }, [cleanup, onSwing, setStatus, targetDetectionFps])
+  }, [cleanup, onSwing, onPoseQuality, setStatus, targetDetectionFps])
 
   const stop = useCallback(async (): Promise<LiveSessionResult | null> => {
     const generation = generationRef.current
