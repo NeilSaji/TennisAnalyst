@@ -6,13 +6,16 @@ import type { JointGroup } from '@/lib/jointAngles'
 import { renderPose, renderAngleLabels, normalizeLandmarks } from './PoseRenderer'
 import { SwingPathTracer } from './SwingPathTracer'
 
-// Strict-previous lookup: return the latest sampled pose frame whose
-// timestamp is at or before the requested time. The overlay never leads
-// the video; at worst it trails by one sample interval (~33ms at 30fps
-// sampling). Earlier we used nearest-neighbor, but that can return a
-// frame 16ms in the future of the video moment — which the user reads
-// as "joints moving ahead of the person." Still no interpolation
-// (don't synthesize positions the detector never saw).
+// Nearest-neighbor lookup: return whichever bracketing pose sample is
+// closest in time to the requested moment. At 30fps sampling the worst
+// case lag is ±16ms (half a sample interval) instead of strict-
+// previous's up-to-33ms one-sided lag. We were on strict-previous
+// because of an old "joints moving ahead of the person" complaint, but
+// that turned out to trace to a separate predictive racket-extension
+// bug, not to nearest-neighbor itself. Switching back here meaningfully
+// reduces the visible drift between the player and the skeleton during
+// fast motion. Still no interpolation — we never synthesize a position
+// the detector never produced.
 export function getFrameAtTime(frames: PoseFrame[], timeSec: number): PoseFrame | null {
   if (!frames.length) return null
   const timeMs = timeSec * 1000
@@ -21,7 +24,11 @@ export function getFrameAtTime(frames: PoseFrame[], timeSec: number): PoseFrame 
   if (timeMs >= last.timestamp_ms) return last
   for (let i = 1; i < frames.length; i++) {
     if (frames[i].timestamp_ms > timeMs) {
-      return frames[i - 1]
+      const prev = frames[i - 1]
+      const next = frames[i]
+      const dPrev = timeMs - prev.timestamp_ms
+      const dNext = next.timestamp_ms - timeMs
+      return dPrev <= dNext ? prev : next
     }
   }
   return last

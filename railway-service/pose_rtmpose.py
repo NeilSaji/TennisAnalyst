@@ -435,18 +435,26 @@ def coco17_to_blazepose33(
     for coco_id, blaze_id in COCO17_TO_BLAZEPOSE33.items():
         x_px, y_px = coco_kpts[coco_id]
         score = float(coco_scores[coco_id])
-        # Map to normalized [0,1] coords. Clip slightly below 1.0 so a
-        # keypoint right at the bottom edge doesn't read as "off frame"
-        # to the render-side check (which requires lm.y <= 1).
-        x_norm = float(np.clip(x_px / img_w, 0.0, 1.0))
-        y_norm = float(np.clip(y_px / img_h, 0.0, 1.0))
+        # Detect "off-frame" BEFORE clipping. RTMPose runs on a YOLO crop
+        # and re-projects to full-frame pixel coords. When the player walks
+        # partially off screen the network still emits a confident
+        # prediction, which post-clip lands exactly at the frame edge with
+        # high visibility, so the renderer keeps drawing a phantom limb
+        # at the boundary. Mirror what the browser MediaPipe path does:
+        # if the raw landmark falls outside [0,1] of the frame, force
+        # visibility to 0 so the render-side cutoff drops it.
+        x_raw = x_px / img_w if img_w > 0 else 0.5
+        y_raw = y_px / img_h if img_h > 0 else 0.5
+        in_frame = 0.0 <= x_raw <= 1.0 and 0.0 <= y_raw <= 1.0
+        x_norm = float(np.clip(x_raw, 0.0, 1.0))
+        y_norm = float(np.clip(y_raw, 0.0, 1.0))
         landmarks[blaze_id] = {
             "id": blaze_id,
             "name": BLAZEPOSE_LANDMARK_NAMES[blaze_id],
             "x": round(x_norm, 4),
             "y": round(y_norm, 4),
             "z": 0.0,  # RTMPose-2D doesn't predict z; downstream tolerates 0.
-            "visibility": round(score, 3),
+            "visibility": round(score, 3) if in_frame else 0.0,
         }
 
     return landmarks
