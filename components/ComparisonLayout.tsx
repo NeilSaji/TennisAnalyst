@@ -316,7 +316,11 @@ function ProSkeletonOverlay({
     timeMappingRef.current = timeMapping
   })
 
-  // Keep canvas pixel dimensions in sync with the container element via ResizeObserver
+  // Keep canvas pixel dimensions in sync with the container element via
+  // ResizeObserver. Canvas backing store gets DPR-scaled so retina
+  // displays render the skeleton at native pixel sharpness instead of
+  // the fuzzy 1x backing store the previous version produced. Mirrors
+  // VideoCanvas's pattern (videoWidth × dpr + ctx.scale(dpr,dpr)).
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -324,8 +328,9 @@ function ProSkeletonOverlay({
       for (const entry of entries) {
         const { width, height } = entry.contentRect
         if (width && height) {
-          canvas.width = Math.round(width)
-          canvas.height = Math.round(height)
+          const dpr = window.devicePixelRatio || 1
+          canvas.width = Math.round(width * dpr)
+          canvas.height = Math.round(height * dpr)
         }
       }
     })
@@ -357,7 +362,18 @@ function ProSkeletonOverlay({
       const ctx = canvas.getContext('2d')
       if (!ctx) return
 
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      // Convert backing-store dims back to logical (CSS-pixel) dims for
+      // the draw call so PoseRenderer's hardcoded line widths / dot
+      // radii stay constant in CSS pixels. ctx.setTransform resets any
+      // accumulated scale before re-applying — without this, the scale
+      // stacks on every rAF tick and the skeleton runs off the canvas
+      // within a few frames.
+      const dpr = window.devicePixelRatio || 1
+      const logicalW = canvas.width / dpr
+      const logicalH = canvas.height / dpr
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.scale(dpr, dpr)
+      ctx.clearRect(0, 0, logicalW, logicalH)
 
       // Apply time mapping if available: convert user time (s) -> pro time (ms)
       const userTimeMs = syncedTimeRef.current * 1000
@@ -368,7 +384,7 @@ function ProSkeletonOverlay({
       const frame = getFrameAtTime(proFramesRef.current, proTimeMs)
       if (frame) {
         const normalized = normalizeLandmarks(frame)
-        renderPose(ctx, normalized, canvas.width, canvas.height, {
+        renderPose(ctx, normalized, logicalW, logicalH, {
           visible: visibleRef.current,
           showSkeleton: showSkeletonRef.current,
           color: 'rgba(249,115,22,0.9)',

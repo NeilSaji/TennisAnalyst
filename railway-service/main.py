@@ -271,6 +271,11 @@ def _extract_with_mediapipe(
         "video_fps": video_fps,
         "duration_ms": round(total_duration_ms),
         "schema_version": 2,
+        # Identifies which backend produced these keypoints. The browser
+        # surfaces this as a diagnostic chip so we can tell at a glance
+        # whether a "tracing is off" complaint is coming from server
+        # mediapipe vs server rtmpose vs browser fallback.
+        "pose_backend": "mediapipe",
     }
 
 
@@ -406,6 +411,9 @@ def _extract_with_rtmpose(
         "duration_ms": round(total_duration_ms),
         # v3: COCO-17 backbone via RTMPose. Wrist-flexion absent.
         "schema_version": 3,
+        # Identifies which backend produced these keypoints (see the
+        # mediapipe path above for rationale).
+        "pose_backend": "rtmpose",
     }
 
 

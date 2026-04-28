@@ -78,12 +78,25 @@ function computeCropRect(landmarks: RawLandmark[]): {
   return { x, y, size }
 }
 
+// Which extraction backend produced these frames. Surfaced in the UI as
+// a small diagnostic chip — when tracing looks bad, the chip tells us in
+// 10 seconds whether the user is on the rtmpose-Railway path I've been
+// testing locally or some other path (server mediapipe / browser
+// fallback) that has different keypoint quality. Without this label the
+// "tracing is off" complaint is unobservable.
+export type ExtractorBackend =
+  | 'rtmpose-railway'
+  | 'mediapipe-railway'
+  | 'mediapipe-browser'
+  | 'mediapipe-browser-fallback'
+
 export type ExtractResult = {
   frames: PoseFrame[]
   fps: number
   // The object URL created for the hidden <video>. Caller is responsible for
   // revoking it (or handing it off for playback). Null on abort.
   objectUrl: string | null
+  extractorBackend: ExtractorBackend
 }
 
 export type ExtractOptions = {
@@ -397,12 +410,22 @@ export async function extractPoseFromVideo(
     // Return the EFFECTIVE fps the loop actually used so downstream
     // smoothing / swing-detection windows compute against real timing.
     // Returning the requested fps would lie about the data density.
-    return { frames: cleaned, fps: effectiveFps, objectUrl }
+    return {
+      frames: cleaned,
+      fps: effectiveFps,
+      objectUrl,
+      extractorBackend: 'mediapipe-browser',
+    }
   } catch (err) {
     // On abort or error, release the object URL — nobody's going to use it
     URL.revokeObjectURL(objectUrl)
     if (err instanceof AbortError) {
-      return { frames: [], fps, objectUrl: null }
+      return {
+        frames: [],
+        fps,
+        objectUrl: null,
+        extractorBackend: 'mediapipe-browser',
+      }
     }
     throw err
   } finally {

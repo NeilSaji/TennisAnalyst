@@ -12,7 +12,9 @@ import { usePoseExtractor } from '@/hooks/usePoseExtractor'
 import { useUser } from '@/hooks/useUser'
 import { detectSwings } from '@/lib/jointAngles'
 import { extractPoseViaRailway, RailwayExtractError } from '@/lib/poseExtractionRailway'
+import type { ExtractorBackend } from '@/lib/poseExtraction'
 import type { PoseFrame, Baseline } from '@/lib/supabase'
+import BackendChip from '@/components/BackendChip'
 
 // Mirrors UploadZone's flag. When true the today's-clip extraction
 // goes through Railway (RTMPose + YOLO crop) which produces meaningfully
@@ -44,6 +46,10 @@ export default function BaselineComparePage() {
 
   const [todayObjectUrl, setTodayObjectUrl] = useState<string | null>(null)
   const [todayFrames, setTodayFrames] = useState<PoseFrame[]>([])
+  // Surfaces which backend produced today's frames so the diagnostic
+  // chip can render. Null until the first upload completes.
+  const [todayExtractorBackend, setTodayExtractorBackend] =
+    useState<ExtractorBackend | null>(null)
   const [dragging, setDragging] = useState(false)
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null)
   // Index (1-based) of the swing within today's clip the user wants to
@@ -107,6 +113,7 @@ export default function BaselineComparePage() {
     if (!file.type.startsWith('video/')) return
 
     let frames: PoseFrame[] | null = null
+    let railwayBackend: ExtractorBackend | null = null
 
     // Railway path: upload the file to Vercel Blob first (Railway pulls
     // from a URL, not a multipart body), then create a pending session
@@ -133,6 +140,7 @@ export default function BaselineComparePage() {
             blobUrl: blob.url,
           })
           frames = result.frames
+          railwayBackend = result.extractorBackend
         }
       } catch (err) {
         if (err instanceof RailwayExtractError) {
@@ -155,6 +163,16 @@ export default function BaselineComparePage() {
     // Prefer Railway frames (better quality) when available; fall back
     // to the browser MediaPipe frames otherwise.
     setTodayFrames(frames ?? localResult.frames)
+    // Tag the chip: railway backend if we have railway frames, else
+    // 'mediapipe-browser-fallback' (Railway was attempted and missed)
+    // when the flag is on, else plain 'mediapipe-browser'.
+    if (frames && railwayBackend) {
+      setTodayExtractorBackend(railwayBackend)
+    } else if (USE_RAILWAY_EXTRACT) {
+      setTodayExtractorBackend('mediapipe-browser-fallback')
+    } else {
+      setTodayExtractorBackend(localResult.extractorBackend)
+    }
 
     // Reset the per-swing selection on a new upload so the previous
     // clip's selection doesn't leak into a clip that may not have
@@ -296,16 +314,20 @@ export default function BaselineComparePage() {
           {canCompare && selectedBaseline && (
             <div className="rounded-2xl border border-white/10 overflow-hidden bg-black">
               <div className="p-3 border-b border-white/5 flex items-center justify-between">
-                <p className="text-sm text-white/60">
-                  <span className="text-emerald-300">{selectedBaseline.label}</span>
-                  <span className="text-white/30"> vs </span>
-                  <span className="text-white">Today</span>
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm text-white/60">
+                    <span className="text-emerald-300">{selectedBaseline.label}</span>
+                    <span className="text-white/30"> vs </span>
+                    <span className="text-white">Today</span>
+                  </p>
+                  <BackendChip backend={todayExtractorBackend} />
+                </div>
                 <button
                   onClick={() => {
                     if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
                     setTodayObjectUrl(null)
                     setTodayFrames([])
+                    setTodayExtractorBackend(null)
                   }}
                   className="text-xs text-white/40 hover:text-white"
                 >

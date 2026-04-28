@@ -7,6 +7,7 @@ import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
 import SegmentPickerGrid from '@/components/SegmentPickerGrid'
 import SwingBaselineGrid, { type SwingBaselineSaveOverride } from '@/components/SwingBaselineGrid'
+import BackendChip from '@/components/BackendChip'
 import type { SegmentCardSaveOverride } from '@/components/SegmentCard'
 import { usePoseStore, useJointStore } from '@/store'
 import { detectSwings } from '@/lib/jointAngles'
@@ -23,7 +24,8 @@ const VideoCanvas = dynamic(() => import('@/components/VideoCanvas'), { ssr: fal
 const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), { ssr: false })
 
 export default function AnalyzePage() {
-  const { framesData, blobUrl, localVideoUrl, sessionId, shotType } = usePoseStore()
+  const { framesData, blobUrl, localVideoUrl, sessionId, shotType, extractorBackend } =
+    usePoseStore()
   const { visible, showSkeleton, showRacket, showAngles } = useJointStore()
   const [done, setDone] = useState(false)
   const [allFrames, setAllFrames] = useState<PoseFrame[]>([])
@@ -295,7 +297,10 @@ export default function AnalyzePage() {
             blobUrl && (
               <div className="rounded-2xl border border-white/10 bg-black overflow-hidden">
                 <div className="p-3 border-b border-white/5 flex items-center justify-between">
-                  <span className="text-sm font-medium text-white">Your Swing</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-white">Your Swing</span>
+                    <BackendChip backend={extractorBackend} />
+                  </div>
                   <button
                     onClick={() => setDone(false)}
                     className="text-xs text-white/40 hover:text-white"

@@ -48,8 +48,15 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
   const [lastFile, setLastFile] = useState<File | null>(null)
   const [showRetry, setShowRetry] = useState(false)
 
-  const { setFramesData, setBlobUrl, setLocalVideoUrl, setProcessing, isProcessing, setShotType: persistShotType } =
-    usePoseStore()
+  const {
+    setFramesData,
+    setBlobUrl,
+    setLocalVideoUrl,
+    setProcessing,
+    isProcessing,
+    setShotType: persistShotType,
+    setExtractorBackend,
+  } = usePoseStore()
 
   const { extract, progress: extractProgress, error: extractError, isProcessing: extracting, abort } = usePoseExtractor()
 
@@ -196,6 +203,13 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         setBusy(false)
         return
       }
+      // If we ended up here AFTER attempting Railway, the user's actual
+      // pose data is browser-mediapipe but they were *expecting* server
+      // extraction — distinguish so the diagnostic chip can warn (red)
+      // rather than just informing (yellow).
+      if (USE_RAILWAY_EXTRACT) {
+        result = { ...result, extractorBackend: 'mediapipe-browser-fallback' }
+      }
     }
 
     setOverallProgress(95)
@@ -237,6 +251,7 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     const playbackUrl = usedRailway ? URL.createObjectURL(file) : result.objectUrl
     setLocalVideoUrl(playbackUrl)
     setFramesData(result.frames)
+    setExtractorBackend(result.extractorBackend)
     persistShotType(shotType)
     setOverallProgress(100)
     setStatusMsg(

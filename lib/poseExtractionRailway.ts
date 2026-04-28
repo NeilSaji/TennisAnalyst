@@ -1,7 +1,7 @@
 'use client'
 
 import type { PoseFrame } from '@/lib/supabase'
-import type { ExtractResult } from '@/lib/poseExtraction'
+import type { ExtractResult, ExtractorBackend } from '@/lib/poseExtraction'
 
 // Poll interval (ms) for the session-status check. Extraction on Railway
 // runs server-side and typically finishes in 60-90s on a 1-2 minute clip.
@@ -37,9 +37,21 @@ export type RailwayExtractOptions = {
 }
 
 function buildExtractResultFromKeypoints(
-  keypointsJson: { frames: PoseFrame[]; fps_sampled?: number },
+  keypointsJson: {
+    frames: PoseFrame[]
+    fps_sampled?: number
+    pose_backend?: string
+  },
   blobUrl: string,
 ): ExtractResult {
+  // Map the Railway-side backend name to the UI label. Anything we
+  // don't recognize falls back to mediapipe-railway (the historical
+  // default) so old keypoints_json rows written before this field
+  // existed don't break.
+  let extractorBackend: ExtractorBackend = 'mediapipe-railway'
+  if (keypointsJson.pose_backend === 'rtmpose') {
+    extractorBackend = 'rtmpose-railway'
+  }
   return {
     frames: keypointsJson.frames,
     fps: keypointsJson.fps_sampled ?? 30,
@@ -48,6 +60,7 @@ function buildExtractResultFromKeypoints(
     // object URL for playback — we return the blobUrl as a fallback
     // so downstream code that expects a non-null URL keeps working.
     objectUrl: blobUrl,
+    extractorBackend,
   }
 }
 
@@ -137,7 +150,11 @@ export async function extractPoseViaRailway(
 
     const body = (await pollRes.json()) as {
       status?: string
-      keypoints_json?: { frames: PoseFrame[]; fps_sampled?: number }
+      keypoints_json?: {
+        frames: PoseFrame[]
+        fps_sampled?: number
+        pose_backend?: string
+      }
       error_message?: string
     }
 
