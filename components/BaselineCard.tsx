@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import type { Baseline } from '@/lib/supabase'
 
 interface BaselineCardProps {
@@ -49,13 +50,24 @@ export default function BaselineCard({ baseline, onSetActive, onRename, onDelete
           : 'border-white/10 bg-white/[0.02]'
       }`}
     >
-      <video
-        src={baseline.blob_url}
-        className="w-24 h-24 rounded-lg object-cover bg-black shrink-0"
-        muted
-        playsInline
-        preload="metadata"
-      />
+      <Link
+        href={`/baseline/${baseline.id}`}
+        className="shrink-0 group relative"
+        title="Watch with pose overlay"
+      >
+        <video
+          src={baseline.blob_url}
+          className="w-24 h-24 rounded-lg object-cover bg-black"
+          muted
+          playsInline
+          preload="metadata"
+        />
+        <div className="absolute inset-0 rounded-lg bg-black/0 group-hover:bg-black/40 flex items-center justify-center transition-colors">
+          <svg viewBox="0 0 24 24" className="w-6 h-6 fill-white opacity-0 group-hover:opacity-100 transition-opacity">
+            <polygon points="5,3 19,12 5,21" />
+          </svg>
+        </div>
+      </Link>
 
       <div className="flex-1 min-w-0">
         {editing ? (
@@ -99,6 +111,12 @@ export default function BaselineCard({ baseline, onSetActive, onRename, onDelete
       </div>
 
       <div className="flex gap-2 shrink-0">
+        <Link
+          href={`/baseline/${baseline.id}`}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white/5 hover:bg-white/10 text-white/70 hover:text-white transition-colors"
+        >
+          Watch
+        </Link>
         {!baseline.is_active && onSetActive && (
           <button
             onClick={async () => {
