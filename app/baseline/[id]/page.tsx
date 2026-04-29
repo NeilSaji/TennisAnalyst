@@ -24,6 +24,7 @@ export default function BaselineWatchPage({ params }: { params: Promise<{ id: st
   const [baseline, setBaseline] = useState<Baseline | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [showOverlay, setShowOverlay] = useState(true)
 
   useEffect(() => {
     if (authLoading) return
@@ -96,21 +97,29 @@ export default function BaselineWatchPage({ params }: { params: Promise<{ id: st
                 )}
               </div>
             </div>
-            <Link
-              href="/baseline/compare"
-              className="shrink-0 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 hover:text-white text-xs font-medium transition-colors"
-            >
-              Compare new swing
-            </Link>
+            <div className="flex gap-2 shrink-0">
+              <button
+                onClick={() => setShowOverlay((v) => !v)}
+                className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 hover:text-white text-xs font-medium transition-colors"
+              >
+                {showOverlay ? 'Hide joints' : 'Show joints'}
+              </button>
+              <Link
+                href="/baseline/compare"
+                className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 hover:text-white text-xs font-medium transition-colors"
+              >
+                Compare new swing
+              </Link>
+            </div>
           </div>
 
           <VideoCanvas
             src={baseline.blob_url}
             framesData={baseline.keypoints_json?.frames ?? []}
             visible={ALL_VISIBLE}
-            showSkeleton
-            showRacket
-            showAngles
+            showSkeleton={showOverlay}
+            showRacket={showOverlay}
+            showAngles={showOverlay}
             shotType={baseline.shot_type}
           />
         </>
