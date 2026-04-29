@@ -6,6 +6,7 @@ import Link from 'next/link'
 import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
 import SegmentPickerGrid from '@/components/SegmentPickerGrid'
+import BestShotPanel from '@/components/BestShotPanel'
 import SwingBaselineGrid, { type SwingBaselineSaveOverride } from '@/components/SwingBaselineGrid'
 import BackendChip from '@/components/BackendChip'
 import type { SegmentCardSaveOverride } from '@/components/SegmentCard'
@@ -392,6 +393,14 @@ export default function AnalyzePage() {
               savedSwingIndices={savedSwingIndices}
               errorBySwingIndex={errorBySwingIndex}
             />
+          )}
+
+          {/* AI pick of the best shot in the multi-segment set. Calls
+              Anthropic with a compact angle summary per segment and renders
+              "Shot N — short reasoning" above the grid so the user knows
+              which one to focus on first. */}
+          {done && sessionId && segments.length > 1 && (
+            <BestShotPanel sessionId={sessionId} segmentCount={segments.length} />
           )}
 
           {/* Multi-shot picker. Rendered whenever the server detected >1
